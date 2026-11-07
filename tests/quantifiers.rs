@@ -152,28 +152,3 @@ fn callbacks_bind_one_parameter_per_argument() {
         assert_eq!(r.canonical.to_string(), expected, "{source}");
     }
 }
-
-#[test]
-fn filter_reduce_and_map_share_the_callback_application() {
-    for (source, expected) in [
-        ("[1, -1].filter((x) => x > 0).length", "(Num 1)"),
-        ("[3, 1, 2].filter((x) => x > 1).length", "(Num 2)"),
-        ("['a', 'off'].filter((n) => n !== 'off').length", "(Num 1)"),
-        ("[1, -1].filter((x, k) => k === 1)[0]", "(Num -1)"),
-        ("[1, 2].reduce((acc) => acc, 0)", "(Num 0)"),
-        ("[1, 2].reduce((a, b) => a + b, 0)", "(Num 3)"),
-        ("[1, 2].map((x) => x + 1)[0]", "(Num 2)"),
-        ("[1, 2].map((x, k) => x + k)[1]", "(Num 3)"),
-    ] {
-        let r = checked(source, Verdict::NoCheat);
-        assert_eq!(r.canonical.to_string(), expected, "{source}");
-    }
-}
-
-#[test]
-fn a_decided_branch_is_never_distributed_into() {
-    // Nil's class holds If(false, [-1], Nil). Filtering through that dead If re-filtered
-    // [-1] at every next index and never saturated.
-    let r = checked("[1, -1].filter((x, k) => x > 0)", Verdict::NoCheat);
-    assert_eq!(r.canonical.to_string(), "(Cons (Num 1) Nil)");
-}

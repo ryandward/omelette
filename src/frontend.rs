@@ -252,7 +252,29 @@ impl Lower {
         }
         self.scope.truncate(mark);
         self.walks.truncate(walks);
-        result
+        self.eta(result).unwrap_or(result)
+    }
+    /// A walker passes (element, index), so (x, k) => f(x, k) is f itself when f mentions
+    /// neither. The one-parameter (x) => f(x) is not: ['1', '2'].map(parseInt) passes the
+    /// index, and its eta-expansion drops it. Reducing here, before egg, keeps the e-graph
+    /// free of an f whose own class beta-reduces back into applications of f.
+    fn eta(&self, lam: Id) -> Option<Id> {
+        let [x, inner] = self.shape(lam, "Lam")?;
+        let [k, body] = self.shape(inner, "Lam")?;
+        let [call, index] = self.shape(body, "App")?;
+        let [f, element] = self.shape(call, "App")?;
+        let bound = |id: Id, binder: Id| self.shape::<1>(id, "Var") == Some([binder]);
+        (bound(element, x) && bound(index, k) && !self.mentions(f, x) && !self.mentions(f, k))
+            .then_some(f)
+    }
+    fn shape<const N: usize>(&self, id: Id, op: &str) -> Option<[Id; N]> {
+        let n = &self.out[id];
+        (n.op.as_str() == op).then(|| n.children.as_slice().try_into().ok())?
+    }
+    fn mentions(&self, id: Id, binder: Id) -> bool {
+        let n = &self.out[id];
+        (n.op.as_str() == "Var" && n.children[0] == binder)
+            || n.children.iter().any(|&c| self.mentions(c, binder))
     }
     fn lookup(&self, name: &str) -> Id {
         self.scope.iter().rev().find(|(n, _)| n == name).unwrap().1

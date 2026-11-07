@@ -16,6 +16,16 @@ pub struct Data {
     pub string: bool,
     pub integer: bool,
     pub clash: bool,
+    /// The value is never undefined.
+    pub defined: bool,
+    /// A list whose in-bounds elements are all defined. Input lists are, by the model.
+    pub elements: bool,
+    /// A function whose result for a walker's (element, index) is defined.
+    pub returns: bool,
+    /// A function with a resolved body, which a walker can actually apply.
+    pub callable: bool,
+    /// Every representation contains unsupported syntax or an unresolved call.
+    pub opaque: bool,
 }
 #[derive(Default)]
 pub struct Facts;
@@ -143,14 +153,10 @@ impl Analysis<SymbolLang> for Facts {
                     if let (Some(a), Some(b)) = (g[k[0]].data.text, g[k[1]].data.text) {
                         d.boolean = Some(a == b);
                     }
-                    // Strict equality never coerces strings to numbers, booleans,
-                    // or undefined. Handle both orientations without a swap cycle.
+                    // Strict equality never coerces strings to numbers or booleans. Handle both
+                    // orientations without a swap cycle; undefined is strict-eq-defined-undef.
                     for (a, b) in [(k[0], k[1]), (k[1], k[0])] {
-                        if g[a].data.string
-                            && (g[b].data.integer
-                                || g[b].data.boolean.is_some()
-                                || has(g, b, "Undef"))
-                        {
+                        if g[a].data.string && (g[b].data.integer || g[b].data.boolean.is_some()) {
                             d.boolean = Some(false);
                         }
                     }
@@ -182,6 +188,45 @@ impl Analysis<SymbolLang> for Facts {
             || d.hi.is_some()
             || matches!(op(n), "Add" | "Sub" | "Neg")
             || op(n).starts_with("Lin:");
+        let c = |i: usize| &g[k[i]].data;
+        d.defined = d.integer
+            || d.string
+            || d.boolean.is_some()
+            || match op(n) {
+                "Num" | "B" | "Str" | "Concat" | "Len" | "Mul" | "Min" | "Max" => true,
+                "StrictEq" | "EqI" | "Lt" | "Le" | "Not" | "And" | "Or" | "Truthy" => true,
+                "Every" | "Some" | "Lam" => true,
+                "Nil" | "Cons" | "Append" | "Sublist" | "Reverse" | "Select" | "Filteri" => true,
+                "Map" => true,
+                // An in-bounds read is exactly as defined as the list's elements.
+                "At" => c(0).elements,
+                "If" => c(1).defined && c(2).defined,
+                "Maybe" => c(0).defined || c(1).defined,
+                _ => false,
+            };
+        d.elements = match op(n) {
+            "Var" | "Nil" => true,
+            "Cons" => c(0).defined && c(1).elements,
+            "Append" => c(0).elements && c(1).elements,
+            "If" => c(1).elements && c(2).elements,
+            "Sublist" | "Reverse" | "Select" => c(0).elements,
+            "Filteri" => c(2).elements,
+            // map's elements are f's results: defined only when f provably returns a value.
+            "Map" => c(0).returns,
+            _ => false,
+        };
+        if op(n) == "Lam" {
+            let body = k[1];
+            d.returns = if has(g, body, "Lam") {
+                g[body].data.returns
+            } else {
+                g[body].data.defined
+            };
+            d.callable = !g[body].data.opaque;
+        }
+        d.opaque = SYNTAX.contains(&op(n))
+            || (HIGHER_ORDER.contains(&op(n)) && !c(0).callable)
+            || k.iter().any(|&id| g[id].data.opaque);
         d
     }
     fn merge(&mut self, a: &mut Data, b: Data) -> DidMerge {
@@ -198,6 +243,12 @@ impl Analysis<SymbolLang> for Facts {
         a.string |= b.string;
         a.integer |= b.integer;
         a.clash |= a.string && (a.integer || a.boolean.is_some());
+        // Proofs: one representation suffices. Opacity: every representation must be opaque.
+        a.defined |= b.defined;
+        a.elements |= b.elements;
+        a.returns |= b.returns;
+        a.callable |= b.callable;
+        a.opaque &= b.opaque;
         DidMerge(*a != old, *a != b)
     }
     fn modify(g: &mut Graph, id: Id) {
@@ -257,6 +308,10 @@ fn unbranched(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
 }
 fn undecided() -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     |g, id, _| g[id].data.boolean.is_none()
+}
+fn defined(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| g[s[a]].data.defined
 }
 fn integer(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let a = v(a);
@@ -352,6 +407,8 @@ fn rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
     RULES.get_or_init(make_rules)
 }
+// Walkers that apply their first child as a callback.
+const HIGHER_ORDER: &[&str] = &["Map", "Filteri", "Foldl", "Every", "Some"];
 const SYNTAX: &[&str] = &[
     "Prop",
     "Elem",
@@ -368,15 +425,19 @@ const SYNTAX: &[&str] = &[
     "Unknown",
     "Let",
 ];
+// Unsupported syntax and unresolved calls, including a walker over a function it cannot
+// apply, cost enough that extraction prefers any resolved representation.
 #[derive(Clone)]
-struct Cost;
-impl CostFunction<SymbolLang> for Cost {
+struct Cost<'a>(&'a Graph);
+impl CostFunction<SymbolLang> for Cost<'_> {
     type Cost = usize;
     fn cost<C>(&mut self, n: &SymbolLang, mut costs: C) -> usize
     where
         C: FnMut(Id) -> usize,
     {
-        let own = if SYNTAX.contains(&op(n)) { 10000 } else { 1 };
+        let unresolved = SYNTAX.contains(&op(n))
+            || (HIGHER_ORDER.contains(&op(n)) && !self.0[n.children[0]].data.callable);
+        let own = if unresolved { 10000 } else { 1 };
         n.children
             .iter()
             .fold(own, |a, &id| a.saturating_add(costs(id)))
@@ -458,7 +519,7 @@ pub fn evaluate_with_limits(
     }
     let root = r.egraph.find(r.roots[0]);
     let saturated = matches!(r.stop_reason, Some(StopReason::Saturated));
-    let canonical = Extractor::new(&r.egraph, Cost).find_best(root).1;
+    let canonical = Extractor::new(&r.egraph, Cost(&r.egraph)).find_best(root).1;
     let mut seen = HashSet::new();
     let mut stack = vec![root];
     let mut hit = false;
@@ -471,10 +532,10 @@ pub fn evaluate_with_limits(
             stack.extend(&n.children);
             if op(n) == "Maybe" {
                 let (z, m) = (n.children[0], n.children[1]);
+                // An undetermined read: not proven present (At), absent, or defined.
                 if has(&r.egraph, m, "IndexQ")
-                    && !["Undef", "At", "Oob", "Num", "B", "Str", "Concat"]
-                        .iter()
-                        .any(|o| has(&r.egraph, m, o))
+                    && !r.egraph[m].data.defined
+                    && !["Undef", "At", "Oob"].iter().any(|o| has(&r.egraph, m, o))
                     && !["Undef", "Oob", "Throw"]
                         .iter()
                         .any(|o| has(&r.egraph, z, o))
@@ -487,12 +548,9 @@ pub fn evaluate_with_limits(
     let consistent = r.egraph.classes().all(|c| {
         !c.data.clash
             && !(has(&r.egraph, c.id, "Nil") && has(&r.egraph, c.id, "Cons"))
-            && !(has(&r.egraph, c.id, "Undef")
-                && ["Num", "At", "Str", "Concat"]
-                    .iter()
-                    .any(|o| has(&r.egraph, c.id, o)))
+            && !(has(&r.egraph, c.id, "Undef") && c.data.defined)
     });
-    let opaque = canonical.as_ref().iter().any(|n| SYNTAX.contains(&op(n)));
+    let opaque = r.egraph[root].data.opaque;
     let verdict = if !consistent || !saturated {
         Verdict::Undecided
     } else if hit {
@@ -695,6 +753,9 @@ impl Applier<SymbolLang, Facts> for MaybeFromRead {
             return vec![];
         };
         let mut changed = false;
+        if !g[t].data.defined {
+            return vec![]; // Maybe z m equals If c t z only when t is never undefined.
+        }
         for (m, at, xs, k) in reads_tested_by(g, c) {
             let maybe = if t == at {
                 SymbolLang::new("Maybe", vec![z, m])
@@ -742,23 +803,15 @@ fn presence(c: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let c = v(c);
     move |g, _, s| !reads_tested_by(g, s[c]).is_empty()
 }
-// The f of maybe z f (xs !? k), abstracted from the present branch t. None unless t is
-// defined, varies with the element, and can collide with z: a constant t only observes
-// absence (isNothing), and a non-empty list never collides with the empty one.
+// The f of maybe z f (xs !? k), abstracted from the defined present branch t. None unless
+// t varies with the element and can collide with z: a constant t only observes absence
+// (isNothing), and a non-empty list never collides with the empty one.
 fn element_function(g: &mut Graph, t: Id, read: &[Id], present: Id, z: Id) -> Option<Id> {
     let d = &g[t].data;
     if d.boolean.is_some() || d.text.is_some() || num(g, t).is_some() {
         return None;
     }
-    let defined = d.integer
-        || d.string
-        || g[t].nodes.iter().any(|n| {
-            matches!(
-                op(n),
-                "Truthy" | "Not" | "StrictEq" | "EqI" | "Lt" | "Le" | "And" | "Or" | "Cons" | "Nil"
-            )
-        });
-    if !defined || (has(g, t, "Cons") && has(g, z, "Nil")) {
+    if has(g, t, "Cons") && has(g, z, "Nil") {
         return None;
     }
     let binder = g.add(SymbolLang::leaf("@elem"));
@@ -1109,7 +1162,7 @@ pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
     }
     let r = runner.run(rules());
     let roots: Vec<_> = r.roots.iter().map(|&id| r.egraph.find(id)).collect();
-    let extractor = Extractor::new(&r.egraph, Cost);
+    let extractor = Extractor::new(&r.egraph, Cost(&r.egraph));
     let canonical = roots.iter().map(|&id| extractor.find_best(id).1).collect();
     Ok(JointEvaluation {
         roots,

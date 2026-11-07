@@ -61,3 +61,11 @@ CHEAT	names[i] === undefined ? false : names[i] === 'on'
 no cheat	names.some((n) => n === 'on')
 no cheat	names.slice(i, i + 1).map((n) => n === 'on')
 no cheat	names.map((n, i) => names[i] === 'on')
+# An unknown callback is an unresolved call: f(1, 0) ?? 0 is undecided in every spelling.
+UNDECIDED	[1, 2].map(f)[0] ?? 0
+UNDECIDED	[1, 2].map((x, k) => f(x, k))[0] ?? 0
+UNDECIDED	[1, 2].map((x) => f(x))[0] ?? 0
+UNDECIDED	[1, 2].map(f)[0]
+UNDECIDED	xs.filter(p)
+UNDECIDED	xs.filter((x, k) => p(x, k))
+no cheat	[1, 2].map((x) => undefined)[0] ?? 0
