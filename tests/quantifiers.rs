@@ -2,7 +2,9 @@ use egg::{AstSize, Extractor};
 use omelette::engine::{Evaluation, Verdict, evaluate, evaluate_joint};
 
 /// maybe true (!== 'off') (names !? i), as the engine spells it.
-const CANONICAL: &str = "(Maybe (B true) (IndexQ (Map (Lam @elem (Not (StrictEq (Var @elem) (Str utf16:006f00660066)))) (Var free:names)) (Var free:i)))";
+const EVERY: &str = "(Maybe (B true) (IndexQ (Map (Lam @elem (Not (StrictEq (Var @elem) (Str utf16:006f00660066)))) (Var free:names)) (Var free:i)))";
+/// maybe false (=== 'on') (names !? i).
+const SOME: &str = "(Maybe (B false) (IndexQ (Map (Lam @elem (StrictEq (Var @elem) (Str utf16:006f006e))) (Var free:names)) (Var free:i)))";
 
 fn checked(source: &str, verdict: Verdict) -> Evaluation {
     let r = evaluate(source).unwrap();
@@ -32,29 +34,40 @@ fn witnesses(r: &Evaluation) -> Vec<String> {
     out
 }
 
-#[test]
-fn direct_reads_reduce_to_the_canonical_maybe() {
-    for source in [
-        "names[i] === undefined ? true : names[i] !== 'off'",
-        "names[i] !== 'off'",
-        "names[i] === undefined || names[i] !== 'off'",
-    ] {
+/// Each direct-read spelling carries the canonical witness, and all share one class.
+fn reduce_to(canonical: &str, sources: [&str; 3]) {
+    for source in sources {
         let r = checked(source, Verdict::Cheat);
         assert!(
-            witnesses(&r).iter().any(|w| w == CANONICAL),
+            witnesses(&r).iter().any(|w| w == canonical),
             "{source}: {:?}",
             witnesses(&r)
         );
     }
-    let r = evaluate_joint(&[
-        "names[i] === undefined ? true : names[i] !== 'off'",
-        "names[i] !== 'off'",
-        "names[i] === undefined || names[i] !== 'off'",
-    ])
-    .unwrap();
+    let r = evaluate_joint(&sources).unwrap();
     assert!(r.saturated);
     assert_eq!(r.roots[0], r.roots[1]);
     assert_eq!(r.roots[0], r.roots[2]);
+}
+
+#[test]
+fn direct_reads_reduce_to_the_canonical_maybe() {
+    reduce_to(
+        EVERY,
+        [
+            "names[i] === undefined ? true : names[i] !== 'off'",
+            "names[i] !== 'off'",
+            "names[i] === undefined || names[i] !== 'off'",
+        ],
+    );
+    reduce_to(
+        SOME,
+        [
+            "names[i] === undefined ? false : names[i] === 'on'",
+            "names[i] === 'on'",
+            "names[i] !== undefined && names[i] === 'on'",
+        ],
+    );
 }
 
 #[test]
@@ -138,4 +151,29 @@ fn callbacks_bind_one_parameter_per_argument() {
         let r = checked(source, Verdict::NoCheat);
         assert_eq!(r.canonical.to_string(), expected, "{source}");
     }
+}
+
+#[test]
+fn filter_reduce_and_map_share_the_callback_application() {
+    for (source, expected) in [
+        ("[1, -1].filter((x) => x > 0).length", "(Num 1)"),
+        ("[3, 1, 2].filter((x) => x > 1).length", "(Num 2)"),
+        ("['a', 'off'].filter((n) => n !== 'off').length", "(Num 1)"),
+        ("[1, -1].filter((x, k) => k === 1)[0]", "(Num -1)"),
+        ("[1, 2].reduce((acc) => acc, 0)", "(Num 0)"),
+        ("[1, 2].reduce((a, b) => a + b, 0)", "(Num 3)"),
+        ("[1, 2].map((x) => x + 1)[0]", "(Num 2)"),
+        ("[1, 2].map((x, k) => x + k)[1]", "(Num 3)"),
+    ] {
+        let r = checked(source, Verdict::NoCheat);
+        assert_eq!(r.canonical.to_string(), expected, "{source}");
+    }
+}
+
+#[test]
+fn a_decided_branch_is_never_distributed_into() {
+    // Nil's class holds If(false, [-1], Nil). Filtering through that dead If re-filtered
+    // [-1] at every next index and never saturated.
+    let r = checked("[1, -1].filter((x, k) => x > 0)", Verdict::NoCheat);
+    assert_eq!(r.canonical.to_string(), "(Cons (Num 1) Nil)");
 }

@@ -50,3 +50,14 @@ CHEAT	names[i] === undefined ? true : names[i] !== 'off'
 no cheat	names.every((n) => n !== 'off')
 no cheat	names.slice(i, i + 1).map((n) => n !== 'off')
 no cheat	names.map((n, i) => names[i] !== 'off')
+# some over the same list: maybe false (=== 'on') (names !? i).
+CHEAT	names.slice(i, i + 1).some((n) => n === 'on')
+CHEAT	names[i] === 'on'
+CHEAT	!names.slice(i, i + 1).every((n) => n !== 'on')
+CHEAT	names.slice(i, i + 1).filter((n) => n === 'on').length > 0
+CHEAT	names.slice(i, i + 1).filter((n) => n === 'on').length !== 0
+CHEAT	names[i] !== undefined && names[i] === 'on'
+CHEAT	names[i] === undefined ? false : names[i] === 'on'
+no cheat	names.some((n) => n === 'on')
+no cheat	names.slice(i, i + 1).map((n) => n === 'on')
+no cheat	names.map((n, i) => names[i] === 'on')

@@ -242,6 +242,22 @@ fn different(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     move |g, _, s| g.find(s[a]) != g.find(s[b])
 }
 
+fn live(c: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let c = v(c);
+    move |g, _, s| g[s[c]].data.boolean.is_none()
+}
+fn unbranched(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| {
+        !g[s[a]]
+            .nodes
+            .iter()
+            .any(|n| op(n) == "If" && g[n.children[0]].data.boolean.is_none())
+    }
+}
+fn undecided() -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    |g, id, _| g[id].data.boolean.is_none()
+}
 fn integer(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let a = v(a);
     move |g, _, s| g[s[a]].data.integer
@@ -343,6 +359,7 @@ const SYNTAX: &[&str] = &[
     "MCall1",
     "MCall2",
     "App",
+    "Call2",
     "Truthy",
     "Coalesce",
     "Default",
@@ -429,7 +446,14 @@ pub fn evaluate_with_limits(
         .run(rules());
     if std::env::var_os("TRACE").is_some() {
         for (i, it) in r.iterations.iter().enumerate() {
-            eprintln!("{i}: {} {:?}", it.egraph_nodes, it.applied);
+            eprintln!(
+                "{i}: {} nodes, search {:.0} us, apply {:.0} us, rebuild {:.0} us {:?}",
+                it.egraph_nodes,
+                it.search_time * 1e6,
+                it.apply_time * 1e6,
+                it.rebuild_time * 1e6,
+                it.applied
+            );
         }
     }
     let root = r.egraph.find(r.roots[0]);
@@ -670,21 +694,8 @@ impl Applier<SymbolLang, Facts> for MaybeFromRead {
         let Some(undef) = g.lookup(SymbolLang::leaf("Undef")) else {
             return vec![];
         };
-        let mut reads = vec![];
-        for parent in g[c].parents().map(|p| g.find(p)).collect::<BTreeSet<_>>() {
-            for n in &g[parent].nodes {
-                let k = &n.children;
-                if op(n) == "If"
-                    && g.find(k[0]) == c
-                    && g.find(k[2]) == undef
-                    && let Some(at) = g[k[1]].nodes.iter().find(|n| op(n) == "At")
-                {
-                    reads.push((parent, g.find(k[1]), at.children[0], at.children[1]));
-                }
-            }
-        }
         let mut changed = false;
-        for (m, at, xs, k) in reads {
+        for (m, at, xs, k) in reads_tested_by(g, c) {
             let maybe = if t == at {
                 SymbolLang::new("Maybe", vec![z, m])
             } else {
@@ -704,6 +715,32 @@ impl Applier<SymbolLang, Facts> for MaybeFromRead {
         }
         if changed { vec![id] } else { vec![] }
     }
+}
+// Partial reads whose presence test is c, found by their expansion If c (At xs k) Undef
+// among the parents of c: (read class, At class, xs, k).
+fn reads_tested_by(g: &Graph, c: Id) -> Vec<(Id, Id, Id, Id)> {
+    let c = g.find(c);
+    let Some(undef) = g.lookup(SymbolLang::leaf("Undef")) else {
+        return vec![];
+    };
+    let mut reads = vec![];
+    for parent in g[c].parents().map(|p| g.find(p)).collect::<BTreeSet<_>>() {
+        for n in &g[parent].nodes {
+            let k = &n.children;
+            if op(n) == "If"
+                && g.find(k[0]) == c
+                && g.find(k[2]) == undef
+                && let Some(at) = g[k[1]].nodes.iter().find(|n| op(n) == "At")
+            {
+                reads.push((parent, g.find(k[1]), at.children[0], at.children[1]));
+            }
+        }
+    }
+    reads
+}
+fn presence(c: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let c = v(c);
+    move |g, _, s| !reads_tested_by(g, s[c]).is_empty()
 }
 // The f of maybe z f (xs !? k), abstracted from the present branch t. None unless t is
 // defined, varies with the element, and can collide with z: a constant t only observes
@@ -795,6 +832,22 @@ fn call(g: &mut Graph, f: Id, args: &[Id]) -> Id {
         body = g.add(SymbolLang::new("Let", vec![var, a, body]));
     }
     body
+}
+// A rule's callback application, Call2 f a b, reduced by the one arity-aware helper.
+#[derive(Clone)]
+struct Call2;
+impl Applier<SymbolLang, Facts> for Call2 {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let out = call(g, s[v("?f")], &[s[v("?a")], s[v("?b")]]);
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
 }
 // every, some, and a filter's length over a list of at most one element: the callback
 // on xs[0] when it exists, and the empty-list answer when it does not.
@@ -888,7 +941,11 @@ fn expand_read(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let (a, b) = (v(a), v(b));
     move |g, id, s| {
         // Already expanded, e.g. by M1's mapped read.
-        if g[id].nodes.iter().any(|n| op(n) == "If" && has(g, n.children[2], "Undef")) {
+        if g[id]
+            .nodes
+            .iter()
+            .any(|n| op(n) == "If" && has(g, n.children[2], "Undef"))
+        {
             return false;
         }
         let (xs, k) = (s[a], s[b]);
@@ -992,16 +1049,12 @@ impl Applier<SymbolLang, Facts> for ShortFold {
                 }
             }
         }
-        let value = if let Some((acc, element, body)) = binders {
-            if let Some(f) = substitute_affine(g, body, &[(acc, s[v("?z")]), (element, read)]) {
-                add_form(g, f)
-            } else {
-                let body = g.add(SymbolLang::new("Let", vec![acc, s[v("?z")], body]));
-                g.add(SymbolLang::new("Let", vec![element, read, body]))
-            }
-        } else {
-            let app = g.add(SymbolLang::new("App", vec![s[v("?f")], s[v("?z")]]));
-            g.add(SymbolLang::new("App", vec![app, read]))
+        let affine = binders.and_then(|(acc, element, body)| {
+            substitute_affine(g, body, &[(acc, s[v("?z")]), (element, read)])
+        });
+        let value = match affine {
+            Some(f) => add_form(g, f),
+            None => call(g, s[v("?f")], &[s[v("?z")], read]),
         };
         let c = g.add(SymbolLang::new("Lt", vec![zero, len]));
         let out = g.add(SymbolLang::new("If", vec![c, value, s[v("?z")]]));
