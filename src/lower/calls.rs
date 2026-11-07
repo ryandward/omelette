@@ -23,7 +23,7 @@ impl<'a> Lowerer<'a, '_> {
                 return self.unsupported();
             }
             let receiver = self.expr(&m.object);
-            return self.method(receiver, m.property.name.as_str(), args);
+            return self.method(receiver, m.property.name.as_str(), &args);
         }
         let callee = self.expr(&c.callee);
         self.apply(callee, args)
@@ -128,20 +128,20 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    fn method(&mut self, receiver: Val<'a>, name: &str, args: Vec<Val<'a>>) -> Val<'a> {
+    fn method(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         match receiver {
             Val::List(items) => self.literal_method(&items, name, args),
             Val::Short(s) => self.short_method(&s, name, args),
             Val::Term(id, Ty::List) => self.term_method(id, name, args),
             Val::Split(_) => self.lift(receiver, Family::Propagate, &mut |l, r| match r {
                 Val::Undef => Val::Throw,
-                r => l.method(r, name, args.clone()),
+                r => l.method(r, name, args),
             }),
             _ => self.unsupported(),
         }
     }
     /// Unroll a method over a list of known length.
-    fn literal_method(&mut self, items: &Rc<Vec<Val<'a>>>, name: &str, args: Vec<Val<'a>>) -> Val<'a> {
+    fn literal_method(&mut self, items: &Rc<Vec<Val<'a>>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "map" => Val::List(Rc::new(self.each(items, &f))),
@@ -236,7 +236,7 @@ impl<'a> Lowerer<'a, '_> {
 
 impl<'a, 'l> Lowerer<'a, 'l> {
     /// Methods over a list of at most one element: the unit where the slot is absent.
-    fn short_method(&mut self, s: &Rc<Short<'a>>, name: &str, args: Vec<Val<'a>>) -> Val<'a> {
+    fn short_method(&mut self, s: &Rc<Short<'a>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "every" | "some" => {
@@ -268,12 +268,12 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     fn over_slot(&mut self, s: &Short<'a>, family: Family, unit: &Val<'a>, present: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
         let slot = self.split_read(s.read, false);
         let (elem, keep) = (s.elem.clone(), s.keep.clone());
-        self.worlds(slot, family, &mut |l, v| match v {
-            Val::Undef => unit.clone(),
-            _ => {
-                let value = present(l, elem.clone());
-                l.select(&keep, value, unit.clone())
+        self.worlds(slot, family, &mut |l, v| {
+            if matches!(v, Val::Undef) {
+                return unit.clone();
             }
+            let value = present(l, elem.clone());
+            l.select(&keep, value, unit.clone())
         })
     }
     fn short_walk(&mut self, s: &Rc<Short<'a>>, name: &str, f: &Val<'a>) -> Val<'a> {
@@ -288,7 +288,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             next.elem = applied;
         }
         let next = Val::Short(Rc::new(next));
-        if name == "flatMap" { self.method(next, "flat", Vec::new()) } else { next }
+        if name == "flatMap" { self.method(next, "flat", &[]) } else { next }
     }
     fn and_split(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
         self.lift2(a, b, Family::Default, &mut |l, a, b| l.and(a, b))
@@ -305,7 +305,7 @@ pub enum Walker {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    fn term_method(&mut self, list: Id, name: &str, args: Vec<Val<'a>>) -> Val<'a> {
+    fn term_method(&mut self, list: Id, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "map" => Val::Term(self.walker(Walker::Map, &f, list), Ty::List),
@@ -349,20 +349,19 @@ impl<'a> Lowerer<'a, '_> {
         self.coords.insert(i, list);
         let args = vec![Val::Term(x, Ty::Defined), Val::Num(Form::atom(i)), Val::Term(list, Ty::List)];
         let result = self.apply(f.clone(), args);
-        let body = match kind {
-            Walker::Map => self.escape(result),
-            _ => {
-                let truth = self.truthy_split(result);
-                self.b.emit(&truth)
-            }
+        let body = if kind == Walker::Map {
+            self.escape(&result)
+        } else {
+            let truth = self.truthy_split(result);
+            self.b.emit(&truth)
         };
         self.b.add(Core::Lam(vec![x, i, body].into()))
     }
     /// A possibly missing read at another collection's coordinate, left as a hole in a
     /// collection shaped like the walked one.
-    fn escape(&mut self, v: Val<'a>) -> Id {
-        let id = self.b.emit(&v);
-        match &v {
+    fn escape(&mut self, v: &Val<'a>) -> Id {
+        let id = self.b.emit(v);
+        match v {
             Val::Split(s) if s.drift && s.family == Family::Propagate => self.b.add(Core::Escape(id)),
             _ => id,
         }
@@ -375,16 +374,10 @@ impl<'a> Lowerer<'a, '_> {
         match self.projection(f, list) {
             Some(index) => {
                 let read = self.element(list, &index);
-                self.projected(walked, read)
+                projected(walked, &read)
             }
             None => Val::Term(walked, Ty::List),
         }
-    }
-    /// A filtered list holding at most the element read by `slot`.
-    fn projected(&mut self, list: Id, slot: Val<'a>) -> Val<'a> {
-        let Val::Split(s) = &slot else { return Val::Term(list, Ty::List) };
-        let short = Short { list, read: s.read, var: s.elem, elem: Val::Term(s.elem, Ty::Defined), keep: Val::Bool(true) };
-        Val::Short(Rc::new(short))
     }
     fn find(&mut self, list: Id, f: &Val<'a>) -> Val<'a> {
         if let Some(index) = self.projection(f, list) {
@@ -428,14 +421,14 @@ impl<'a> Lowerer<'a, '_> {
     /// last element, or the initial value for an empty list.
     fn reduce(&mut self, list: Id, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
         let len = Form::atom(self.b.add(Core::Len(list)));
-        let last = len.plus(&Form::constant(1), -1).unwrap_or_default();
-        let slot = self.element(list, &last);
+        let final_index = len.plus(&Form::constant(1), -1).unwrap_or_default();
+        let slot = self.element(list, &final_index);
         let acc = self.b.fresh(Kind::Acc);
         let unit = init.clone().unwrap_or(Val::Throw);
         let f = f.clone();
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
-            x => l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x, Val::Num(last.clone()), Val::Term(list, Ty::List)]),
+            x => l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x, Val::Num(final_index.clone()), Val::Term(list, Ty::List)]),
         });
         let id = self.b.emit(&body);
         if !self.b.mentions(id, acc) {
@@ -502,4 +495,11 @@ impl<'a> Lowerer<'a, '_> {
         };
         self.append(list, item)
     }
+}
+
+/// A filtered list holding at most the element read by `slot`.
+fn projected<'a>(list: Id, slot: &Val<'a>) -> Val<'a> {
+    let Val::Split(s) = slot else { return Val::Term(list, Ty::List) };
+    let short = Short { list, read: s.read, var: s.elem, elem: Val::Term(s.elem, Ty::Defined), keep: Val::Bool(true) };
+    Val::Short(Rc::new(short))
 }

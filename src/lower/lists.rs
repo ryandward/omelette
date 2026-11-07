@@ -14,20 +14,20 @@ impl<'a> Lowerer<'a, '_> {
     fn read_plain(&mut self, list: Val<'a>, index: &Val<'a>) -> Val<'a> {
         let Val::Num(f) = index else {
             return match (&list, index) {
-                (Val::Throw, _) | (_, Val::Throw) | (Val::Undef, _) => Val::Throw,
+                (Val::Throw | Val::Undef, _) | (_, Val::Throw) => Val::Throw,
                 (_, Val::Undef) => Val::Undef,
                 _ => self.unsupported(),
             };
         };
         match list {
             Val::Undef | Val::Throw => Val::Throw,
-            Val::List(items) => match f.known() {
-                Some(k) => usize::try_from(k).ok().and_then(|k| items.get(k).cloned()).unwrap_or(Val::Undef),
-                None => {
-                    let id = self.b.emit(&Val::List(items));
-                    self.element(id, f)
+            Val::List(items) => {
+                if let Some(k) = f.known() {
+                    return usize::try_from(k).ok().and_then(|k| items.get(k).cloned()).unwrap_or(Val::Undef);
                 }
-            },
+                let id = self.b.emit(&Val::List(items));
+                self.element(id, f)
+            }
             Val::Short(s) => match f.known() {
                 Some(0) => self.short_element(&s),
                 Some(_) => Val::Undef,

@@ -33,7 +33,7 @@ pub fn scan(g: &Graph, root: Id) -> Findings {
 
 fn visit(g: &Graph, n: &Core, found: &mut Findings) {
     match n {
-        Core::Maybe([flow, z, lam, read]) => witness(g, *flow, *z, *lam, *read, found),
+        Core::Maybe(parts) => witness(g, *parts, found),
         Core::Escape(v) if undetermined(g, *v) => {
             found.families.insert(Family::Drift);
         }
@@ -45,7 +45,7 @@ fn visit(g: &Graph, n: &Core, found: &mut Findings) {
     }
 }
 
-fn witness(g: &Graph, flow: Id, z: Id, lam: Id, read: Id, found: &mut Findings) {
+fn witness(g: &Graph, [flow, z, lam, read]: [Id; 4], found: &mut Findings) {
     if !undetermined(g, read) {
         return;
     }

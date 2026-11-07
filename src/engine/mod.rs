@@ -46,6 +46,9 @@ pub struct Evaluation {
 }
 
 /// Warm the shared rules, the parser, and egg's clock once at harness startup.
+///
+/// # Panics
+/// Never: the bootstrap expression is valid.
 pub fn initialize() {
     static READY: OnceLock<()> = OnceLock::new();
     READY.get_or_init(|| {

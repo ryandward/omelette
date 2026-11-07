@@ -100,9 +100,13 @@ fn constant(g: &Graph, n: &Core) -> Option<Const> {
         Core::Nil => Some(Const::Nil),
         Core::Lin(_) | Core::Mul(_) => form_of(g, n).and_then(|f| f.known()).map(Const::Int),
         Core::Le(_) | Core::Lt(_) | Core::Not(_) | Core::And(_) | Core::Or(_) | Core::Eq(_) => logic(g, n).map(Const::Bool),
-        Core::If([c, a, b]) => boolean(g, *c).and_then(|c| g[if c { *a } else { *b }].data.constant.clone()),
-        Core::Concat([a, b]) => text(g, *a).zip(text(g, *b)).map(|(x, y)| Const::Str(x.concat(y))),
-        Core::Text(a) => join_text(g, *a).map(Const::Str),
+        Core::If([test, yes, no]) => {
+            boolean(g, *test).and_then(|t| g[if t { *yes } else { *no }].data.constant.clone())
+        }
+        Core::Concat([left, right]) => {
+            text(g, *left).zip(text(g, *right)).map(|(l, r)| Const::Str(l.concat(r)))
+        }
+        Core::Text(item) => join_text(g, *item).map(Const::Str),
         _ => None,
     }
 }
@@ -122,7 +126,7 @@ fn logic(g: &Graph, n: &Core) -> Option<bool> {
             (Some(false), Some(false)) => Some(false),
             _ => None,
         },
-        Core::Eq([a, b]) => strict_eq(g[*a].data.constant.as_ref()?, g[*b].data.constant.as_ref()?),
+        Core::Eq([a, b]) => Some(strict_eq(g[*a].data.constant.as_ref()?, g[*b].data.constant.as_ref()?)),
         _ => None,
     }
 }
@@ -138,11 +142,8 @@ fn order(g: &Graph, a: Id, b: Id, strict: bool) -> Option<bool> {
     a.lo.zip(b.hi).is_some_and(|(l, h)| fails(l, h)).then_some(false)
 }
 
-fn strict_eq(a: &Const, b: &Const) -> Option<bool> {
-    Some(match (a, b) {
-        (Const::NaN, _) | (_, Const::NaN) => false,
-        _ => a == b,
-    })
+fn strict_eq(a: &Const, b: &Const) -> bool {
+    !matches!((a, b), (Const::NaN, _) | (_, Const::NaN)) && a == b
 }
 
 fn text(g: &Graph, id: Id) -> Option<Utf16> {
@@ -189,16 +190,19 @@ fn width(g: &Graph, list: Id) -> Option<i64> {
     })
 }
 
-fn interval(g: &Graph, f: &Form) -> (Option<i64>, Option<i64>) {
-    let mut lo = Some(f.constant);
-    let mut hi = Some(f.constant);
-    for (&atom, &c) in &f.terms {
-        let d = &g[atom].data;
-        let (l, h) = if c >= 0 { (d.lo, d.hi) } else { (d.hi, d.lo) };
-        lo = lo.zip(l).and_then(|(x, y)| x.checked_add(y.checked_mul(c)?));
-        hi = hi.zip(h).and_then(|(x, y)| x.checked_add(y.checked_mul(c)?));
+fn interval(g: &Graph, form: &Form) -> (Option<i64>, Option<i64>) {
+    let step = |total: Option<i64>, bound: Option<i64>, coefficient: i64| {
+        total.zip(bound).and_then(|(sum, b)| sum.checked_add(b.checked_mul(coefficient)?))
+    };
+    let mut low = Some(form.constant);
+    let mut high = Some(form.constant);
+    for (&atom, &coefficient) in &form.terms {
+        let data = &g[atom].data;
+        let (down, up) = if coefficient >= 0 { (data.lo, data.hi) } else { (data.hi, data.lo) };
+        low = step(low, down, coefficient);
+        high = step(high, up, coefficient);
     }
-    (lo, hi)
+    (low, high)
 }
 
 /// The affine form of a Lin or Mul node, with atoms canonical.

@@ -225,14 +225,14 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     }
     /// `test ? yes : no` for a symbolic boolean test, pushed inside any splits.
     pub fn select(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
-        self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, y, n))
+        self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, &y, &n))
     }
-    fn choose(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
-        if yes.is_known() && super::ops::same(&yes, &no) == Some(true) {
-            return yes;
+    fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>) -> Val<'a> {
+        if yes.is_known() && super::ops::same(yes, no) == Some(true) {
+            return yes.clone();
         }
-        let ty = join(&yes, &no);
-        let (c, y, n) = (self.b.emit(test), self.b.emit(&yes), self.b.emit(&no));
+        let ty = join(yes, no);
+        let (c, y, n) = (self.b.emit(test), self.b.emit(yes), self.b.emit(no));
         let id = self.b.add(Core::If([c, y, n]));
         match ty {
             None => Val::Num(Form::atom(id)),

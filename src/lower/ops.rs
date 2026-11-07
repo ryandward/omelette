@@ -98,29 +98,29 @@ impl<'a> Lowerer<'a, '_> {
         self.lift2(a, b, family, &mut |l, a, b| match op {
             Bin::Add => l.add(a, b),
             Bin::Sub | Bin::Mul => l.arith(op, &a, &b),
-            Bin::Lt | Bin::Le => l.order(op == Bin::Lt, a, b),
-            Bin::Eq => l.strict_eq(a, b),
+            Bin::Lt | Bin::Le => l.order(op == Bin::Lt, &a, &b),
+            Bin::Eq => l.strict_eq(&a, &b),
         })
     }
     fn add(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
         if is_text(&a) || is_text(&b) {
             let (a, b) = (self.to_text(a), self.to_text(b));
-            return self.concat(a, b);
+            return self.concat(&a, &b);
         }
         self.arith(Bin::Add, &a, &b)
     }
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
-        let (Some(x), Some(y)) = (numeric(a), numeric(b)) else {
+        let (Some(lhs), Some(rhs)) = (numeric(a), numeric(b)) else {
             return if poisons(a) || poisons(b) { Val::NaN } else { self.dynamic(op_name(op), &[a, b], Ty::Defined) };
         };
         let form = match op {
-            Bin::Sub => x.plus(&y, -1),
-            Bin::Mul => match (x.known(), y.known()) {
-                (Some(k), _) => y.scale(k),
-                (_, Some(k)) => x.scale(k),
-                _ => return self.product(&x, &y),
+            Bin::Sub => lhs.plus(&rhs, -1),
+            Bin::Mul => match (lhs.known(), rhs.known()) {
+                (Some(factor), _) => rhs.scale(factor),
+                (_, Some(factor)) => lhs.scale(factor),
+                _ => return self.product(&lhs, &rhs),
             },
-            _ => x.plus(&y, 1),
+            _ => lhs.plus(&rhs, 1),
         };
         form.map_or_else(|| self.dynamic(op_name(op), &[a, b], Ty::Defined), Val::Num)
     }
@@ -129,36 +129,36 @@ impl<'a> Lowerer<'a, '_> {
         Val::Num(Form::atom(self.b.add(Core::Mul([x, y]))))
     }
     /// `a < b` (strict) or `a <= b`.
-    fn order(&mut self, strict: bool, a: Val<'a>, b: Val<'a>) -> Val<'a> {
-        if let (Some(x), Some(y)) = (numeric(&a), numeric(&b)) {
+    fn order(&mut self, strict: bool, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
+        if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
             let gap = y.plus(&x, -1).and_then(|d| d.plus(&Form::constant(i64::from(strict)), -1));
             return gap.map_or(Val::Bool(false), |d| self.b.nonnegative(&d));
         }
-        if poisons(&a) || poisons(&b) {
+        if poisons(a) || poisons(b) {
             return Val::Bool(false);
         }
-        if let (Val::Str(x), Val::Str(y)) = (&a, &b) {
+        if let (Val::Str(x), Val::Str(y)) = (a, b) {
             let (x, y) = (x.units(), y.units());
             return Val::Bool(if strict { x < y } else { x <= y });
         }
-        self.dynamic(if strict { "<" } else { "<=" }, &[&a, &b], Ty::Bool)
+        self.dynamic(if strict { "<" } else { "<=" }, &[a, b], Ty::Bool)
     }
 }
 
 impl<'a> Lowerer<'a, '_> {
-    pub fn strict_eq(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
-        if let Some(known) = same(&a, &b) {
+    pub fn strict_eq(&mut self, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
+        if let Some(known) = same(a, b) {
             return Val::Bool(known);
         }
-        if let (Some(x), Some(y)) = (numeric_only(&a), numeric_only(&b)) {
+        if let (Some(x), Some(y)) = (numeric_only(a), numeric_only(b)) {
             let gap = y.plus(&x, -1).unwrap_or_default();
             let (up, down) = (self.b.nonnegative(&gap), gap.scale(-1).map(|g| self.b.nonnegative(&g)));
             return down.map_or(Val::Bool(false), |down| self.and(up, down));
         }
-        if distinct_types(&a, &b) {
+        if distinct_types(a, b) {
             return Val::Bool(false);
         }
-        let (x, y) = (self.b.emit(&a), self.b.emit(&b));
+        let (x, y) = (self.b.emit(a), self.b.emit(b));
         Val::Term(self.b.add(Core::Eq([x, y])), Ty::Bool)
     }
     pub fn and(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
@@ -193,8 +193,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Str(s) => Val::Bool(!s.units().is_empty()),
             Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List) => Val::Bool(true),
             Val::Term(_, Ty::Str) => {
-                let empty = Val::Str(Utf16::new([]));
-                let eq = self.strict_eq(v, empty);
+                let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
             }
             Val::Term(_, Ty::Defined | Ty::Any) => self.dynamic("truthy", &[&v], Ty::Bool),
@@ -225,12 +224,12 @@ impl<'a> Lowerer<'a, '_> {
             _ => self.dynamic("string", &[&v], Ty::Str),
         }
     }
-    pub fn concat(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
-        match (&a, &b) {
+    pub fn concat(&mut self, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
+        match (a, b) {
             (Val::Throw, _) | (_, Val::Throw) => Val::Throw,
             (Val::Str(x), Val::Str(y)) => Val::Str(x.concat(*y)),
             _ => {
-                let (x, y) = (self.b.emit(&a), self.b.emit(&b));
+                let (x, y) = (self.b.emit(a), self.b.emit(b));
                 Val::Term(self.b.add(Core::Concat([x, y])), Ty::Str)
             }
         }

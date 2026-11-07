@@ -126,12 +126,11 @@ impl Applier<Core, Facts> for Sum {
     fn apply_one(&self, g: &mut Graph, id: Id, s: &Subst, _: Option<&PatternAst<Core>>, _: Symbol) -> Vec<Id> {
         let mut total = Form::default();
         for part in self.0 {
-            let piece = match part.parse::<i64>() {
-                Ok(n) => Form::constant(n),
-                Err(_) => {
-                    let len = g.add(Core::Len(s[var(part)]));
-                    class_form(g, len)
-                }
+            let piece = if let Ok(n) = part.parse::<i64>() {
+                Form::constant(n)
+            } else {
+                let len = g.add(Core::Len(s[var(part)]));
+                class_form(g, len)
             };
             let Some(sum) = total.plus(&piece, 1) else { return vec![] };
             total = sum;
