@@ -186,6 +186,8 @@ impl CostFunction<Core> for Cost {
     fn cost<C: FnMut(Id) -> usize>(&mut self, n: &Core, mut costs: C) -> usize {
         let own = match n {
             Core::Unsupported(_) | Core::Call(_) => 10_000,
+            // Show the tagged witness rather than its untagged value.
+            Core::Elim(_) => 100,
             Core::Int(_) | Core::Str(_) | Core::True | Core::False | Core::Undef => 0,
             _ => 1,
         };

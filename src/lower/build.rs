@@ -105,14 +105,15 @@ impl Builder {
         if s.family == Family::Propagate && passes {
             return s.read;
         }
-        let family = if s.present.is_known() && s.family.swallows() {
+        let absent = self.emit(&s.absent);
+        let present = self.emit(&s.present);
+        // A present side that ignores the element only observes whether it is there.
+        let family = if s.family.swallows() && !self.mentions(present, s.elem) {
             Family::Observe
         } else {
             s.family
         };
         let flow = self.add(Core::Flow(family));
-        let absent = self.emit(&s.absent);
-        let present = self.emit(&s.present);
         let lam = self.add(Core::Lam(vec![s.elem, present].into()));
         self.add(Core::Maybe([flow, absent, lam, s.read]))
     }

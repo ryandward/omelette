@@ -381,25 +381,24 @@ impl<'a> Lowerer<'a, '_> {
 
 impl<'a> Lowerer<'a, '_> {
     fn filter(&mut self, list: Id, f: &Val<'a>) -> Val<'a> {
-        let walked = self.walker(Walker::Filter, f, list);
-        match self.projection(f, list) {
-            Some(index) => {
-                let read = self.element(list, &index);
-                projected(walked, &read)
-            }
-            None => Val::Term(walked, Ty::List),
+        if let Some((index, lam)) = self.projection(f, list) {
+            let walked = self.b.add(Core::Filter([lam, list]));
+            let read = self.element(list, &index);
+            return projected(walked, &read);
         }
+        Val::Term(self.walker(Walker::Filter, f, list), Ty::List)
     }
     fn find(&mut self, list: Id, f: &Val<'a>) -> Val<'a> {
-        if let Some(index) = self.projection(f, list) {
+        if let Some((index, _)) = self.projection(f, list) {
             return self.element(list, &index);
         }
         let walked = self.walker(Walker::Filter, f, list);
         self.element(walked, &Form::constant(0))
     }
     /// The index `j` when the callback is `(_, idx) => idx === j` (either side) with `j` an
-    /// integer that mentions neither parameter: the filter keeps at most `list[j]`.
-    fn projection(&mut self, f: &Val<'a>, list: Id) -> Option<Form> {
+    /// integer that mentions neither parameter: the filter keeps at most `list[j]`. Also the
+    /// predicate's term, lowered once.
+    fn projection(&mut self, f: &Val<'a>, list: Id) -> Option<(Form, Id)> {
         let Val::Fun(fun) = f else { return None };
         let (Body::Expr(body), Some(index)) = (fun.body, fun.params.items.get(1)) else { return None };
         let BindingPattern::BindingIdentifier(idx) = &index.pattern else { return None };
@@ -414,7 +413,7 @@ impl<'a> Lowerer<'a, '_> {
         let other = if is_idx(&eq.left) { &eq.right } else if is_idx(&eq.right) { &eq.left } else { return None };
         self.projected_index(fun, list, other)
     }
-    fn projected_index(&mut self, fun: &Fun<'a>, list: Id, target: &'a Expression<'a>) -> Option<Form> {
+    fn projected_index(&mut self, fun: &Fun<'a>, list: Id, target: &'a Expression<'a>) -> Option<(Form, Id)> {
         let (x, i) = (self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));
         let saved = std::mem::replace(&mut self.env, fun.env.clone());
         let args = vec![Val::Term(x, Ty::Defined), Val::Num(Form::atom(i)), Val::Term(list, Ty::List)];
@@ -422,8 +421,13 @@ impl<'a> Lowerer<'a, '_> {
         let value = bound.then(|| self.expr(target));
         self.env = saved;
         let Some(Val::Num(form)) = value else { return None };
-        let free = !form.terms.keys().any(|&a| self.b.mentions(a, x) || self.b.mentions(a, i));
-        free.then_some(form)
+        if form.terms.keys().any(|&a| self.b.mentions(a, x) || self.b.mentions(a, i)) {
+            return None;
+        }
+        self.coords.insert(i, list);
+        let test = self.strict_eq(&Val::Num(Form::atom(i)), &Val::Num(form.clone()));
+        let body = self.b.emit(&test);
+        Some((form, self.b.add(Core::Lam(vec![x, i, body].into()))))
     }
 }
 

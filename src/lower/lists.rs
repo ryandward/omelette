@@ -121,8 +121,12 @@ impl<'a> Lowerer<'a, '_> {
             },
         }
     }
-    /// One when the slot is present and kept, zero otherwise: the unit of counting.
+    /// One when the slot is present and kept, zero otherwise. Unfiltered, that is the
+    /// list's length term; filtered, zero is the unit a filter's count absorbs absence into.
     fn short_length(&mut self, s: &Short<'a>) -> Val<'a> {
+        if matches!(s.keep, Val::Bool(true)) {
+            return Val::Num(Form::atom(self.b.add(Core::Len(s.list))));
+        }
         let slot = self.split_read(s.read, false);
         let keep = s.keep.clone();
         self.worlds(slot, Family::Unit, &mut |l, v| match v {

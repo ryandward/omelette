@@ -58,6 +58,7 @@ fn witnesses() -> Vec<Rule> {
         rw!("append-default"; "(read (append ?a (cons ?z ?t)) 0)" => "(maybe default ?z (lam elem:@0 elem:@0) (read ?a 0))"),
         rw!("prefix-last"; "(read (cons ?z ?xs) (len ?xs))" => Last),
         rw!("maybe-absent"; "(maybe ?fam ?z ?f ?r)" => "?z" if absent("?r")),
+        rw!("maybe-value"; "(maybe ?fam ?z ?f ?r)" => "(elim ?z ?f ?r)"),
         rw!("presence-absent"; "(maybe ?fam (if ?c ?a ?b) ?f ?r)" => "(maybe ?fam ?b ?f ?r)" if presence("?r", "?c")),
         rw!("presence-present"; "(maybe ?fam ?z (lam ?e (if ?c ?a ?b)) ?r)" => "(maybe ?fam ?z (lam ?e ?a) ?r)" if presence("?r", "?c")),
     ]

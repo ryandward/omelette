@@ -47,8 +47,10 @@ define_language! {
         // A read that may be missing, and one proven in range.
         "read" = Read([Id; 2]),
         "at" = At([Id; 2]),
-        // maybe z (x i. f) read, tagged with the flow that produced it.
+        // maybe z (x. f) read, tagged with the flow that produced it: the evidence.
         "maybe" = Maybe([Id; 4]),
+        // The same value without the tag, where spellings of one value meet.
+        "elim" = Elim([Id; 3]),
         // A possibly missing read left as a hole in a collection shaped like another.
         "escape" = Escape(Id),
         // A call of a function lowering could not resolve: callee, then arguments.
