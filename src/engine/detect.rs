@@ -107,7 +107,11 @@ fn judge(g: &Graph, known: &HashSet<Id>, group: &[[Id; 4]], found: &mut Findings
     // An unknown function or value may make the branch ignore the element (`p = () => false`)
     // or test its presence (`p = () => true`, or `n === x` with `x` undefined).
     let resolved = group.iter().any(|&[_, _, lam, _]| bodies(g, lam).any(|body| known.contains(&g.find(body))));
-    if resolved && group.iter().any(|&[_, z, ..]| certain(g, z)) {
+    // An element that may itself be undefined: a branch that varies only there conflates the
+    // missing read with that element, not with an ordinary value, and detection cannot tell
+    // the two apart.
+    let ordinary = !group.iter().any(|&[_, _, lam, _]| binds(g, lam, Kind::Item));
+    if resolved && ordinary && group.iter().any(|&[_, z, ..]| certain(g, z)) {
         found.families.extend(swallowing);
     } else {
         found.possible = true;
@@ -157,6 +161,14 @@ fn bodies(g: &Graph, lam: Id) -> impl Iterator<Item = Id> + '_ {
     g[lam].nodes.iter().filter_map(|n| match n {
         Core::Lam(children) => children.last().copied(),
         _ => None,
+    })
+}
+
+/// Whether the lambda's binder is a variable of this kind.
+fn binds(g: &Graph, lam: Id, kind: Kind) -> bool {
+    g[lam].nodes.iter().any(|n| match n {
+        Core::Lam(children) => children.first().is_some_and(|&b| g[b].nodes.iter().any(|n| matches!(n, Core::Var(v) if v.kind == kind))),
+        _ => false,
     })
 }
 

@@ -289,3 +289,12 @@ fn destructuring_iterates_code_points() {
     value("(([a, b]) => b)('ab')", "utf16:0062");
     value("(([a]) => a)(undefined)", "throw");
 }
+
+#[test]
+fn a_witness_over_an_element_that_may_be_undefined_is_undecided() {
+    // Every defined element gives 1 and a missing read gives 2: presence is observed. Only the
+    // present `undefined` element also gives 2, which detection cannot separate from a cheat.
+    for source in ["[undefined, ...ys][k] === undefined", "((v) => v !== undefined ? 1 : 2)([undefined, ...ys][k])"] {
+        checked(source, Verdict::Undecided);
+    }
+}

@@ -222,7 +222,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     pub fn worlds(&mut self, v: Val<'a>, family: Family, then: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
         let Val::Split(s) = v else { return then(self, v) };
         let absent = self.within(s.read, Val::Undef, |l| l.worlds(s.absent.clone(), family, then));
-        let element = Val::Term(s.elem, Ty::Defined);
+        let element = Val::Term(s.elem, s.items.ty());
         let present = self.within(s.read, element, |l| l.worlds(s.present.clone(), family, then));
         self.resplit(&s, absent, present, family)
     }
