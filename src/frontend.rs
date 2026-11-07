@@ -1,4 +1,6 @@
-//! Native lowering with affine arithmetic normalization and fresh binding names.
+//! Native lowering from the Oxc AST, with the normalizations that belong at the boundary:
+//! canonical affine sums, decoded string values, globally fresh binders, total reads of a
+//! walker's own receiver at its index, and eta-reduction of full-arity callbacks.
 use egg::{Id, Language, RecExpr, SymbolLang};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;

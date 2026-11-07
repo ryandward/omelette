@@ -631,28 +631,29 @@ impl Applier<SymbolLang, Facts> for Substitute {
                     };
                     g.add(SymbolLang::new("Let", vec![k[0], a, b]))
                 }
-                // An affine sum stays canonical: substitute its atoms, never nest a Lin in one.
-                _ if let Some(f) = Form::decode(&n)
-                    && let Some(f) = substitute_form(g, f, &[(var, e)]) =>
-                {
-                    add_form(g, f)
-                }
                 _ => {
-                    let mut n = n.clone();
-                    for c in &mut n.children {
-                        if g[*c].data.free.contains(&var) {
-                            if g[*c]
-                                .nodes
-                                .iter()
-                                .any(|n| op(n) == "Var" && n.children[0] == var)
-                            {
-                                *c = e;
-                            } else {
-                                *c = g.add(SymbolLang::new("Let", vec![var, e, *c]));
+                    // An affine sum stays canonical: substitute its atoms, never nest a Lin in one.
+                    if let Some(f) = Form::decode(&n)
+                        && let Some(f) = substitute_form(g, f, &[(var, e)])
+                    {
+                        add_form(g, f)
+                    } else {
+                        let mut n = n.clone();
+                        for c in &mut n.children {
+                            if g[*c].data.free.contains(&var) {
+                                if g[*c]
+                                    .nodes
+                                    .iter()
+                                    .any(|n| op(n) == "Var" && n.children[0] == var)
+                                {
+                                    *c = e;
+                                } else {
+                                    *c = g.add(SymbolLang::new("Let", vec![var, e, *c]));
+                                }
                             }
                         }
+                        g.add(n)
                     }
-                    g.add(n)
                 }
             };
             changed |= g.union(id, result);

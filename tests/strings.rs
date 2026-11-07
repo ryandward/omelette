@@ -1,12 +1,6 @@
-use omelette::engine::{Evaluation, Verdict, evaluate};
-
-fn checked(source: &str, verdict: Verdict) -> Evaluation {
-    let result = evaluate(source).unwrap();
-    assert!(result.saturated, "{source}: {}", result.stop);
-    assert!(result.consistent, "{source}: inconsistent graph");
-    assert_eq!(result.verdict, verdict, "{source}: {}", result.canonical);
-    result
-}
+mod common;
+use common::checked;
+use omelette::engine::Verdict;
 
 #[test]
 fn genomehub_text_and_empty_defaults_use_the_same_rules() {

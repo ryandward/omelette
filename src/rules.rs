@@ -1,18 +1,17 @@
-// Directed structural rules ported from rules.egg. Analysis handles arithmetic and bounds.
-// Select is the zero-or-one-element list at an index, keeping projection relational
-// without distributing conditionals through every consumer. Mirror patterns below
-// handle === explicitly; no general commutation or association rules are installed.
-// Short-list structure is exposed only at its consumers. Rel and At(Sublist) stay
-// semantic primitives until concrete endpoints justify opening their definitions.
-// Comparison and negation rewrites stop once the analysis knows a class's boolean value:
-// a known constant can only gain more spellings of itself. Distribution never enters an If
-// whose condition is decided: its class already holds the live branch, and the dead branch
-// can unfold forever (a filter re-filtering the list it was proven empty against).
-// Relational read lemmas (prefix-last, short-last, seeding a partial read) serve symbolic
-// positions; at-cons decides a known position on a literal list by itself. Likewise the
-// short-list folds leave a literal Cons or Nil to foldl-cons, filteri-cons, and their nils.
-// Integer equality on a live conditional is decided by distributing === into its branches,
-// so it is not also expanded into EqI comparisons that cannot be decided.
+// Directed rewrite rules. The analysis in engine.rs carries bounds, booleans, strings,
+// definedness, and opacity, and conditions consult those facts rather than node shapes.
+// - Select is the zero-or-one-element list at an index, so projection stays relational
+//   without distributing conditionals through every consumer.
+// - === has explicit mirror rules; there is no general commutation or association.
+// - Short-list structure is exposed only at its consumers. Rel and At(Sublist) stay semantic
+//   primitives until concrete endpoints justify opening their definitions. The short-list
+//   folds and the relational read lemmas (prefix-last, short-last, seeding a partial read)
+//   serve symbolic positions; a literal Cons or Nil belongs to at-cons, foldl-cons, and
+//   filteri-cons.
+// - Distribution never enters an If whose condition is decided: the class already holds the
+//   live branch, and the dead one can unfold forever.
+// - Comparison and negation rewrites stop once a class's boolean is known, and integer
+//   equality on a live conditional is decided by distributing === into its branches only.
 fn make_rules() -> Vec<Rule> {
     let mut rules = vec![
         rw!("reduce-cons"; "(MCall1 reduce (Cons ?h ?t) ?f)" => "(Foldl ?f ?h ?t)"),

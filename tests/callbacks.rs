@@ -1,13 +1,6 @@
-use omelette::engine::{Evaluation, Verdict, evaluate, evaluate_joint};
-
-fn checked(source: &str, verdict: Verdict) -> Evaluation {
-    let r = evaluate(source).unwrap();
-    assert!(r.saturated, "{source}: {}", r.stop);
-    assert!(r.consistent, "{source}: inconsistent graph");
-    assert!(r.nodes < 150, "{source}: {} nodes", r.nodes);
-    assert_eq!(r.verdict, verdict, "{source}: {}", r.canonical);
-    r
-}
+mod common;
+use common::checked;
+use omelette::engine::{Verdict, evaluate_joint};
 
 /// Saturate the sources together and report which roots share a class.
 fn same(sources: &[&str]) -> Vec<bool> {

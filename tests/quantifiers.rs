@@ -1,19 +1,12 @@
 use egg::{AstSize, Extractor};
-use omelette::engine::{Evaluation, Verdict, evaluate, evaluate_joint};
+mod common;
+use common::checked;
+use omelette::engine::{Evaluation, Verdict, evaluate_joint};
 
 /// maybe true (!== 'off') (names !? i), as the engine spells it.
 const EVERY: &str = "(Maybe (B true) (IndexQ (Map (Lam @elem (Not (StrictEq (Var @elem) (Str utf16:006f00660066)))) (Var free:names)) (Var free:i)))";
 /// maybe false (=== 'on') (names !? i).
 const SOME: &str = "(Maybe (B false) (IndexQ (Map (Lam @elem (StrictEq (Var @elem) (Str utf16:006f006e))) (Var free:names)) (Var free:i)))";
-
-fn checked(source: &str, verdict: Verdict) -> Evaluation {
-    let r = evaluate(source).unwrap();
-    assert!(r.saturated, "{source}: {}", r.stop);
-    assert!(r.consistent, "{source}: inconsistent graph");
-    assert!(r.nodes < 150, "{source}: {} nodes", r.nodes);
-    assert_eq!(r.verdict, verdict, "{source}: {}", r.canonical);
-    r
-}
 
 /// Every Maybe z (IndexQ xs k) witness in the root class.
 fn witnesses(r: &Evaluation) -> Vec<String> {
