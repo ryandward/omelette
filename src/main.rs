@@ -11,10 +11,11 @@ use std::time::Duration;
 type G = EGraph<SymbolLang, Js>;
 
 #[derive(Debug, Clone, PartialEq)]
-enum Const { Int(i64), Bool(bool) }
+// undefined is a constant like any other, so strict equality is decided on it as on numbers.
+enum Const { Int(i64), Bool(bool), Undef }
 impl std::fmt::Display for Const {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self { Const::Int(v) => write!(f, "{v}"), Const::Bool(b) => write!(f, "{b}") }
+        match self { Const::Int(v) => write!(f, "{v}"), Const::Bool(b) => write!(f, "{b}"), Const::Undef => write!(f, "undef") }
     }
 }
 
@@ -126,7 +127,7 @@ fn eval(eg: &G, n: &SymbolLang) -> Option<Const> {
     let diff = || { let d = form_of(eg, n.children[1]).add(&form_of(eg, n.children[0]).scale(-1)?)?; Some(d.interval(eg)) };
     let decide = |t: &dyn Fn(i64) -> bool, f: &dyn Fn(i64) -> bool| { let (l, h) = diff()?; if l.map_or(false, |l| t(l)) { Some(Const::Bool(true)) } else if h.map_or(false, |h| f(h)) { Some(Const::Bool(false)) } else { None } };
     match (n.op.as_str(), n.children.len()) {
-        (s, 0) => s.parse::<i64>().ok().map(Const::Int).or(match s { "true" => Some(Const::Bool(true)), "false" => Some(Const::Bool(false)), _ => None }),
+        (s, 0) => s.parse::<i64>().ok().map(Const::Int).or(match s { "true" => Some(Const::Bool(true)), "false" => Some(Const::Bool(false)), "undef" => Some(Const::Undef), _ => None }),
         ("+" | "-" | "neg" | "*", _) => node_form(eg, n).filter(|f| f.t.is_empty()).map(|f| Const::Int(f.k)),
         ("<", 2) => decide(&|l| l >= 1, &|h| h <= 0),
         ("<=", 2) => decide(&|l| l >= 0, &|h| h < 0),
@@ -449,7 +450,6 @@ fn rules() -> Vec<Rewrite<SymbolLang, Js>> {
         rewrite!("maybe-num"; "(maybe ?z ?n)" => "?n" if is_int("?n")),
         // No maybe-if: M1 already builds (maybe z m) from the conditional, and distributing maybe over
         // every if e-node in m's class fanned out to 19k applications once if-not and le-not existed.
-        rewrite!("eq-num-undef"; "(=== ?n undef)" => "false" if is_int("?n")),
     ];
     r.push(Rewrite::new("rel-width", "(- (rel ?b ?n) (rel ?a ?n))".parse::<Pattern<SymbolLang>>().unwrap(), RelWidth).unwrap());
     r.push(Rewrite::new("width-seed", "(sublist ?xs ?s ?e)".parse::<Pattern<SymbolLang>>().unwrap(), Width).unwrap());
@@ -560,7 +560,7 @@ fn run(src: &str, show_all: bool) {
     let mut clashes = runner.egraph.analysis.clashes.clone();
     for c in eg.classes() {
         let ops: HashSet<&str> = c.nodes.iter().map(|n| n.op.as_str()).collect();
-        if (ops.contains("undef") && (c.data.constant.is_some() || ops.contains("at"))) || (ops.contains("nil") && ops.contains("cons")) { clashes.push(format!("e-class {}", c.id)); }
+        if (ops.contains("undef") && (matches!(c.data.constant, Some(Const::Int(_) | Const::Bool(_))) || ops.contains("at"))) || (ops.contains("nil") && ops.contains("cons")) { clashes.push(format!("e-class {}", c.id)); }
     }
     println!("consistency: {}", if clashes.is_empty() { "ok".to_string() } else { format!("UNSOUND {clashes:?}") });
     if !hits.is_empty() {
