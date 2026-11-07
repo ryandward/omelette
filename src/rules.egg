@@ -1,3 +1,4 @@
+; Historical egglog specification retained for comparison. The runtime uses rules.rs.
 ; The ECMAScript meaning of the dumper's syntax, as egglog rules over one sort T. JS values are
 ; dynamically typed (if, maybe, let and app return whatever their branches do), so T is every
 ; value; the Clash relation catches a merge of two distinct constructors after the fact.

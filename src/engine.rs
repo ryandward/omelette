@@ -1,0 +1,877 @@
+use crate::affine::Form;
+use egg::{rewrite as rw, *};
+use std::collections::{BTreeSet, HashSet};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+pub type Graph = EGraph<SymbolLang, Facts>;
+type Rule = Rewrite<SymbolLang, Facts>;
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct Data {
+    pub free: BTreeSet<Id>,
+    pub lo: Option<i64>,
+    pub hi: Option<i64>,
+    pub boolean: Option<bool>,
+    pub integer: bool,
+    pub clash: bool,
+}
+#[derive(Default)]
+pub struct Facts;
+fn op(n: &SymbolLang) -> &str {
+    n.op.as_str()
+}
+fn has(g: &Graph, id: Id, name: &str) -> bool {
+    g[id].nodes.iter().any(|n| op(n) == name)
+}
+fn num(g: &Graph, id: Id) -> Option<i64> {
+    let d = &g[id].data;
+    if d.lo == d.hi { d.lo } else { None }
+}
+fn max_bound(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+fn min_bound(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+impl Analysis<SymbolLang> for Facts {
+    type Data = Data;
+    fn make(g: &mut Graph, n: &SymbolLang, _id: Id) -> Data {
+        let mut d = Data::default();
+        let k = &n.children;
+        for &id in k {
+            d.free.extend(&g[id].data.free);
+        }
+        let iv = |i: usize| (g[k[i]].data.lo, g[k[i]].data.hi);
+        let bounds = match op(n) {
+            "Var" => {
+                d.free.insert(k[0]);
+                (None, None)
+            }
+            "Lam" => {
+                d.free.remove(&k[0]);
+                (None, None)
+            }
+            "Let" => {
+                d.free = g[k[2]].data.free.clone();
+                d.free.remove(&k[0]);
+                d.free.extend(&g[k[1]].data.free);
+                (None, None)
+            }
+            "Num" => {
+                let v = g[k[0]].nodes[0].op.as_str().parse::<i64>().ok();
+                (v, v)
+            }
+            "B" => {
+                d.boolean = Some(has(g, k[0], "true"));
+                (None, None)
+            }
+            "Len" => (Some(0), None),
+            "Rel" => (Some(0), iv(1).1),
+            "Add" => (
+                iv(0).0.zip(iv(1).0).and_then(|(a, b)| a.checked_add(b)),
+                iv(0).1.zip(iv(1).1).and_then(|(a, b)| a.checked_add(b)),
+            ),
+            "Sub" => (
+                iv(0).0.zip(iv(1).1).and_then(|(a, b)| a.checked_sub(b)),
+                iv(0).1.zip(iv(1).0).and_then(|(a, b)| a.checked_sub(b)),
+            ),
+            "Neg" => (
+                iv(0).1.and_then(i64::checked_neg),
+                iv(0).0.and_then(i64::checked_neg),
+            ),
+            "Mul" => {
+                let v = num(g, k[0])
+                    .zip(num(g, k[1]))
+                    .and_then(|(a, b)| a.checked_mul(b));
+                (v, v)
+            }
+            "Min" => (
+                iv(0).0.zip(iv(1).0).map(|(a, b)| a.min(b)),
+                min_bound(iv(0).1, iv(1).1),
+            ),
+            "Max" => (
+                max_bound(iv(0).0, iv(1).0),
+                iv(0).1.zip(iv(1).1).map(|(a, b)| a.max(b)),
+            ),
+            "If" => (
+                iv(1).0.zip(iv(2).0).map(|(a, b)| a.min(b)),
+                iv(1).1.zip(iv(2).1).map(|(a, b)| a.max(b)),
+            ),
+            "Lt" | "Le" => {
+                let strict = op(n) == "Lt";
+                if iv(0)
+                    .1
+                    .zip(iv(1).0)
+                    .is_some_and(|(a, b)| if strict { a < b } else { a <= b })
+                {
+                    d.boolean = Some(true);
+                }
+                if iv(0)
+                    .0
+                    .zip(iv(1).1)
+                    .is_some_and(|(a, b)| if strict { a >= b } else { a > b })
+                {
+                    d.boolean = Some(false);
+                }
+                (None, None)
+            }
+            "StrictEq" | "EqI" => {
+                if let (Some(a), Some(b)) = (num(g, k[0]), num(g, k[1])) {
+                    d.boolean = Some(a == b);
+                }
+                (None, None)
+            }
+            _ => {
+                if let Some(f) = Form::decode(n) {
+                    let mut lo = Some(f.constant);
+                    let mut hi = lo;
+                    for (id, c) in f.terms {
+                        let a = &g[id].data;
+                        let (l, h) = if c >= 0 { (a.lo, a.hi) } else { (a.hi, a.lo) };
+                        lo = lo
+                            .zip(l)
+                            .and_then(|(a, b)| a.checked_add(b.checked_mul(c)?));
+                        hi = hi
+                            .zip(h)
+                            .and_then(|(a, b)| a.checked_add(b.checked_mul(c)?));
+                    }
+                    (lo, hi)
+                } else {
+                    (None, None)
+                }
+            }
+        };
+        (d.lo, d.hi) = bounds;
+        d.integer = d.lo.is_some()
+            || d.hi.is_some()
+            || matches!(op(n), "Add" | "Sub" | "Neg")
+            || op(n).starts_with("Lin:");
+        d
+    }
+    fn merge(&mut self, a: &mut Data, b: Data) -> DidMerge {
+        let old = a.clone();
+        a.free = a.free.intersection(&b.free).copied().collect();
+        a.lo = max_bound(a.lo, b.lo);
+        a.hi = min_bound(a.hi, b.hi);
+        a.clash |= b.clash
+            || a.boolean.zip(b.boolean).is_some_and(|(a, b)| a != b)
+            || a.lo.zip(a.hi).is_some_and(|(l, h)| l > h);
+        a.boolean = a.boolean.or(b.boolean);
+        a.integer |= b.integer;
+        DidMerge(*a != old, *a != b)
+    }
+    fn modify(g: &mut Graph, id: Id) {
+        if g[id].data.clash {
+            return;
+        }
+        if let Some(n) = num(g, id) {
+            let a = g.add(SymbolLang::leaf(n.to_string()));
+            let b = g.add(SymbolLang::new("Num", vec![a]));
+            g.union(id, b);
+        }
+        if let Some(v) = g[id].data.boolean {
+            let a = g.add(SymbolLang::leaf(if v { "true" } else { "false" }));
+            let b = g.add(SymbolLang::new("B", vec![a]));
+            g.union(id, b);
+        }
+    }
+}
+fn v(s: &str) -> Var {
+    const NAMES: [&str; 14] = [
+        "?a", "?b", "?v", "?e", "?body", "?xs", "?k", "?f", "?z", "?c", "?acc", "?idx", "?j", "?x",
+    ];
+    static VARS: OnceLock<[Var; 14]> = OnceLock::new();
+    let vars = VARS.get_or_init(|| NAMES.map(|s| s.parse().unwrap()));
+    NAMES
+        .iter()
+        .position(|&name| name == s)
+        .map(|i| vars[i])
+        .unwrap_or_else(|| s.parse().unwrap())
+}
+fn independent(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let (a, b) = (v(a), v(b));
+    move |g, _, s| !g[s[b]].data.free.contains(&s[a])
+}
+fn different(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let (a, b) = (v(a), v(b));
+    move |g, _, s| g.find(s[a]) != g.find(s[b])
+}
+
+fn integer(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| g[s[a]].data.integer
+}
+fn form(g: &Graph, id: Id) -> Form {
+    let original = g.find(id);
+    if let Some(n) = num(g, id) {
+        return Form::constant(n);
+    }
+    for node in &g[id].nodes {
+        if let Some(f) = Form::decode(node) {
+            let mut out = Form::constant(f.constant);
+            for (id, c) in f.terms {
+                let a = Form {
+                    constant: 0,
+                    terms: [(g.find(id), c)].into(),
+                };
+                if let Some(f) = out.plus(&a, 1) {
+                    out = f;
+                } else {
+                    return Form::atom(original);
+                }
+            }
+            return out;
+        }
+    }
+    Form::atom(g.find(id))
+}
+fn add_form(g: &mut Graph, f: Form) -> Id {
+    if f.terms.is_empty() {
+        let n = g.add(SymbolLang::leaf(f.constant.to_string()));
+        return g.add(SymbolLang::new("Num", vec![n]));
+    }
+    if f.constant == 0 && f.terms.len() == 1 && f.terms.values().next() == Some(&1) {
+        return *f.terms.keys().next().unwrap();
+    }
+    g.add(f.node())
+}
+#[derive(Clone)]
+struct Normalize(&'static str);
+impl Applier<SymbolLang, Facts> for Normalize {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let a = form(g, s[v("?a")]);
+        let f = if self.0 == "Neg" {
+            Form::default().plus(&a, -1)
+        } else {
+            a.plus(&form(g, s[v("?b")]), if self.0 == "Sub" { -1 } else { 1 })
+        };
+        let Some(f) = f else { return vec![] };
+        let b = add_form(g, f);
+        if g.union(id, b) { vec![id] } else { vec![] }
+    }
+}
+#[derive(Clone)]
+struct Width;
+impl Applier<SymbolLang, Facts> for Width {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let Some(f) = form(g, s[v("?b")]).plus(&form(g, s[v("?a")]), -1) else {
+            return vec![];
+        };
+        if !f.terms.is_empty() || f.constant < 0 {
+            return vec![];
+        }
+        let mut d = g[id].data.clone();
+        let hi = min_bound(d.hi, Some(f.constant));
+        if hi == d.hi {
+            return vec![];
+        }
+        d.hi = hi;
+        g.set_analysis_data(id, d);
+        vec![id]
+    }
+}
+
+include!("rules.rs");
+
+fn rules() -> &'static [Rule] {
+    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+    RULES.get_or_init(make_rules)
+}
+const SYNTAX: &[&str] = &[
+    "Prop",
+    "Elem",
+    "MCall0",
+    "MCall1",
+    "MCall2",
+    "App",
+    "Truthy",
+    "Coalesce",
+    "Default",
+    "ArrCons",
+    "ArrSpread",
+    "Unknown",
+    "Let",
+];
+#[derive(Clone)]
+struct Cost;
+impl CostFunction<SymbolLang> for Cost {
+    type Cost = usize;
+    fn cost<C>(&mut self, n: &SymbolLang, mut costs: C) -> usize
+    where
+        C: FnMut(Id) -> usize,
+    {
+        let own = if SYNTAX.contains(&op(n)) { 10000 } else { 1 };
+        n.children
+            .iter()
+            .fold(own, |a, &id| a.saturating_add(costs(id)))
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Cheat,
+    NoCheat,
+    Undecided,
+}
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cheat => "CHEAT",
+            Self::NoCheat => "no cheat",
+            Self::Undecided => "UNDECIDED",
+        })
+    }
+}
+pub struct Evaluation {
+    pub verdict: Verdict,
+    pub saturated: bool,
+    pub consistent: bool,
+    pub iterations: usize,
+    pub nodes: usize,
+    pub classes: usize,
+    pub parse_time: Duration,
+    pub total_time: Duration,
+    pub stop: String,
+    pub canonical: RecExpr<SymbolLang>,
+    pub graph: Graph,
+    pub root: Id,
+}
+/// Initialize shared rules, the native parser, and egg's calibrated clock at harness startup.
+/// Evaluation itself always uses a fresh e-graph; no expression results are cached.
+pub fn initialize() {
+    static READY: OnceLock<()> = OnceLock::new();
+    READY.get_or_init(|| {
+        let _ = rules();
+        let expression = crate::frontend::parse("0").expect("valid bootstrap expression");
+        // egg uses quanta: the first run calibrates its clock. Pay that once at startup.
+        let _ = Runner::<SymbolLang, Facts, ()>::default()
+            .with_expr(&expression)
+            .run(&[] as &[Rule]);
+    });
+}
+/// Parse, lower, saturate, check consistency, and extract a verdict in-process.
+pub fn evaluate(src: &str) -> Result<Evaluation, String> {
+    evaluate_with_limits(src, 60, 10000, Duration::from_millis(50))
+}
+pub fn evaluate_with_limits(
+    src: &str,
+    iterations: usize,
+    nodes: usize,
+    time: Duration,
+) -> Result<Evaluation, String> {
+    let start = Instant::now();
+    let expr = crate::frontend::parse(src)?;
+    let parse_time = start.elapsed();
+    let r = Runner::<SymbolLang, Facts, ()>::default()
+        .with_iter_limit(iterations)
+        .with_node_limit(nodes)
+        .with_time_limit(time)
+        .with_scheduler(SimpleScheduler)
+        .with_expr(&expr)
+        .run(rules());
+    if std::env::var_os("TRACE").is_some() {
+        for (i, it) in r.iterations.iter().enumerate() {
+            eprintln!("{i}: {} {:?}", it.egraph_nodes, it.applied);
+        }
+    }
+    let root = r.egraph.find(r.roots[0]);
+    let saturated = matches!(r.stop_reason, Some(StopReason::Saturated));
+    let canonical = Extractor::new(&r.egraph, Cost).find_best(root).1;
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    let mut hit = false;
+    while let Some(id) = stack.pop() {
+        let id = r.egraph.find(id);
+        if !seen.insert(id) {
+            continue;
+        }
+        for n in &r.egraph[id].nodes {
+            stack.extend(&n.children);
+            if op(n) == "Maybe" {
+                let (z, m) = (n.children[0], n.children[1]);
+                if has(&r.egraph, m, "IndexQ")
+                    && !["Undef", "At", "Oob", "Num", "B"]
+                        .iter()
+                        .any(|o| has(&r.egraph, m, o))
+                    && !["Undef", "Oob", "Throw"]
+                        .iter()
+                        .any(|o| has(&r.egraph, z, o))
+                {
+                    hit = true;
+                }
+            }
+        }
+    }
+    let consistent = r.egraph.classes().all(|c| {
+        !c.data.clash
+            && !(has(&r.egraph, c.id, "Nil") && has(&r.egraph, c.id, "Cons"))
+            && !(has(&r.egraph, c.id, "Undef")
+                && ["Num", "At"].iter().any(|o| has(&r.egraph, c.id, o)))
+    });
+    let opaque = canonical.as_ref().iter().any(|n| SYNTAX.contains(&op(n)));
+    let verdict = if !consistent || !saturated {
+        Verdict::Undecided
+    } else if hit {
+        Verdict::Cheat
+    } else if opaque {
+        Verdict::Undecided
+    } else {
+        Verdict::NoCheat
+    };
+    Ok(Evaluation {
+        verdict,
+        saturated,
+        consistent,
+        iterations: r.iterations.len(),
+        nodes: r.egraph.total_size(),
+        classes: r.egraph.number_of_classes(),
+        parse_time,
+        total_time: start.elapsed(),
+        stop: format!("{:?}", r.stop_reason.unwrap()),
+        canonical,
+        graph: r.egraph,
+        root,
+    })
+}
+#[derive(Clone)]
+struct Substitute;
+impl Applier<SymbolLang, Facts> for Substitute {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let (var, e, body) = (s[v("?v")], s[v("?e")], s[v("?body")]);
+        if !g[body].data.free.contains(&var) {
+            return if g.union(id, body) { vec![id] } else { vec![] };
+        }
+        let mut changed = false;
+        for n in g[body].nodes.clone() {
+            let k = &n.children;
+            let result = match op(&n) {
+                "Var" => {
+                    if k[0] == var {
+                        e
+                    } else {
+                        body
+                    }
+                }
+                "Lam" => {
+                    if k[0] == var {
+                        body
+                    } else {
+                        if g[e].data.free.contains(&k[0]) {
+                            continue;
+                        }
+                        let b = g.add(SymbolLang::new("Let", vec![var, e, k[1]]));
+                        g.add(SymbolLang::new("Lam", vec![k[0], b]))
+                    }
+                }
+                "Let" => {
+                    if g[e].data.free.contains(&k[0]) {
+                        continue;
+                    }
+                    let a = g.add(SymbolLang::new("Let", vec![var, e, k[1]]));
+                    let b = if k[0] == var {
+                        k[2]
+                    } else {
+                        g.add(SymbolLang::new("Let", vec![var, e, k[2]]))
+                    };
+                    g.add(SymbolLang::new("Let", vec![k[0], a, b]))
+                }
+                _ => {
+                    let mut n = n.clone();
+                    for c in &mut n.children {
+                        if g[*c].data.free.contains(&var) {
+                            if g[*c]
+                                .nodes
+                                .iter()
+                                .any(|n| op(n) == "Var" && n.children[0] == var)
+                            {
+                                *c = e;
+                            } else {
+                                *c = g.add(SymbolLang::new("Let", vec![var, e, *c]));
+                            }
+                        }
+                    }
+                    g.add(n)
+                }
+            };
+            changed |= g.union(id, result);
+        }
+        if changed { vec![id] } else { vec![] }
+    }
+}
+#[derive(Clone)]
+struct NormalizeAffine;
+impl Applier<SymbolLang, Facts> for NormalizeAffine {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        _: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        if !g[id].nodes.iter().any(|n| op(n).starts_with("Lin:")) {
+            return vec![];
+        }
+        let mut changed = false;
+        for n in g[id].nodes.clone() {
+            if let Some(f) = Form::decode(&n) {
+                let mut out = Some(Form::constant(f.constant));
+                for (child, c) in f.terms {
+                    // Never expand a class through itself. Only one level of canonical affine children.
+                    if g.find(child) == g.find(id) {
+                        out = None;
+                        break;
+                    }
+                    let a = form(g, child);
+                    let scaled = Form::default().plus(&a, c);
+                    out = out.zip(scaled).and_then(|(a, b)| a.plus(&b, 1));
+                }
+                if let Some(f) = out {
+                    let b = add_form(g, f);
+                    changed |= g.union(id, b);
+                }
+            }
+        }
+        if changed { vec![id] } else { vec![] }
+    }
+}
+#[derive(Clone)]
+struct SeedLength;
+impl Applier<SymbolLang, Facts> for SeedLength {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        _: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let n = SymbolLang::new("Len", vec![id]);
+        if g.lookup(n.clone()).is_some() {
+            return vec![];
+        }
+        vec![g.add(n)]
+    }
+}
+#[derive(Clone)]
+struct SeedIndex;
+impl Applier<SymbolLang, Facts> for SeedIndex {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        _: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let n = SymbolLang::new("IndexQ", vec![s[v("?xs")], s[v("?k")]]);
+        if g.lookup(n.clone()).is_some() {
+            return vec![];
+        }
+        vec![g.add(n)]
+    }
+}
+// The relational M1 join is a hash-cons lookup of the partial read's conditional.
+// Report only a changed union, so a successful match does not prevent saturation.
+#[derive(Clone)]
+struct MaybeFromRead;
+impl Applier<SymbolLang, Facts> for MaybeFromRead {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let Some(at) = g.lookup(SymbolLang::new("At", vec![s[v("?xs")], s[v("?k")]])) else {
+            return vec![];
+        };
+        let Some(undef) = g.lookup(SymbolLang::leaf("Undef")) else {
+            return vec![];
+        };
+        let Some(m) = g.lookup(SymbolLang::new("If", vec![s[v("?c")], at, undef])) else {
+            return vec![];
+        };
+        let n = g.add(SymbolLang::new("Maybe", vec![s[v("?z")], m]));
+        if g.union(id, n) { vec![id] } else { vec![] }
+    }
+}
+fn known(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| num(g, s[a]).is_some()
+}
+#[derive(Clone)]
+struct Compare(bool);
+impl Applier<SymbolLang, Facts> for Compare {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let Some(mut f) = form(g, s[v("?b")]).plus(&form(g, s[v("?a")]), -1) else {
+            return vec![];
+        };
+        if self.0 {
+            let Some(n) = f.constant.checked_sub(1) else {
+                return vec![];
+            };
+            f.constant = n;
+        }
+        let b = add_form(g, f);
+        let zero = add_form(g, Form::constant(0));
+        let out = g.add(SymbolLang::new("Le", vec![zero, b]));
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
+}
+fn not_identity(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let (a, b) = (v(a), v(b));
+    move |g, _, s| {
+        !g[s[b]]
+            .nodes
+            .iter()
+            .any(|n| op(n) == "Var" && n.children[0] == s[a])
+    }
+}
+fn not_cons(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| !has(g, s[a], "Cons")
+}
+fn expand_read(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let (a, b) = (v(a), v(b));
+    move |g, _, s| {
+        let (xs, k) = (s[a], s[b]);
+        for n in &g[xs].nodes {
+            match op(n) {
+                "Select" => return false,
+                "Filteri" if index_predicate(g, n.children[0]) => return false,
+                "Append" if num(g, k) == Some(0) && has(g, n.children[1], "Cons") => return false,
+                "Cons" => {
+                    if let Some(len) = g.lookup(SymbolLang::new("Len", vec![n.children[1]]))
+                        && g.find(len) == g.find(k)
+                    {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+}
+fn not_index_predicate(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| !index_predicate(g, s[a])
+}
+fn index_predicate(g: &Graph, id: Id) -> bool {
+    for a in &g[id].nodes {
+        if op(a) != "Lam" {
+            continue;
+        }
+        for b in &g[a.children[1]].nodes {
+            if op(b) != "Lam" || a.children[0] == b.children[0] {
+                continue;
+            }
+            for eq in &g[b.children[1]].nodes {
+                if op(eq) != "StrictEq" {
+                    continue;
+                }
+                for (i, j) in [(0, 1), (1, 0)] {
+                    if g[eq.children[i]]
+                        .nodes
+                        .iter()
+                        .any(|n| op(n) == "Var" && n.children[0] == b.children[0])
+                        && !g[eq.children[j]].data.free.contains(&a.children[0])
+                        && !g[eq.children[j]].data.free.contains(&b.children[0])
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+#[derive(Clone)]
+struct ShortFold;
+impl Applier<SymbolLang, Facts> for ShortFold {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let xs = s[v("?xs")];
+        for a in &g[s[v("?f")]].nodes {
+            if op(a) == "Lam" {
+                for b in &g[a.children[1]].nodes {
+                    if op(b) == "Lam"
+                        && a.children[0] != b.children[0]
+                        && g[b.children[1]]
+                            .nodes
+                            .iter()
+                            .any(|n| op(n) == "Var" && n.children[0] == b.children[0])
+                    {
+                        return vec![];
+                    }
+                }
+            }
+        }
+        let len_node = SymbolLang::new("Len", vec![xs]);
+        let existed = g.lookup(len_node.clone());
+        let len = g.add(len_node);
+        if g[len].data.hi.is_none_or(|hi| hi > 1) {
+            return if existed.is_none() { vec![len] } else { vec![] };
+        }
+        let zero = add_form(g, Form::constant(0));
+        let read = g.add(SymbolLang::new("At", vec![xs, zero]));
+        let mut binders = None;
+        for a in &g[s[v("?f")]].nodes {
+            if op(a) == "Lam" {
+                for b in &g[a.children[1]].nodes {
+                    if op(b) == "Lam"
+                        && a.children[0] != b.children[0]
+                        && !g[s[v("?z")]].data.free.contains(&b.children[0])
+                    {
+                        binders = Some((a.children[0], b.children[0], b.children[1]));
+                        break;
+                    }
+                }
+            }
+        }
+        let value = if let Some((acc, element, body)) = binders {
+            if let Some(f) = substitute_affine(g, body, &[(acc, s[v("?z")]), (element, read)]) {
+                add_form(g, f)
+            } else {
+                let body = g.add(SymbolLang::new("Let", vec![acc, s[v("?z")], body]));
+                g.add(SymbolLang::new("Let", vec![element, read, body]))
+            }
+        } else {
+            let app = g.add(SymbolLang::new("App", vec![s[v("?f")], s[v("?z")]]));
+            g.add(SymbolLang::new("App", vec![app, read]))
+        };
+        let c = g.add(SymbolLang::new("Lt", vec![zero, len]));
+        let out = g.add(SymbolLang::new("If", vec![c, value, s[v("?z")]]));
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
+}
+#[derive(Clone)]
+struct ShortRead;
+impl Applier<SymbolLang, Facts> for ShortRead {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let xs = s[v("?xs")];
+        let Some(len) = g.lookup(SymbolLang::new("Len", vec![xs])) else {
+            return vec![];
+        };
+        if g[len].data.hi.is_none_or(|hi| hi > 1) {
+            return vec![];
+        }
+        let Some(diff) = form(g, len).plus(&form(g, s[v("?k")]), -1) else {
+            return vec![];
+        };
+        if diff.constant != 1 || !diff.terms.is_empty() {
+            return vec![];
+        }
+        let zero = add_form(g, Form::constant(0));
+        let out = g.add(SymbolLang::new("IndexQ", vec![xs, zero]));
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
+}
+/// Saturate several roots together for inspecting algebraic equivalence.
+pub struct JointEvaluation {
+    pub roots: Vec<Id>,
+    pub canonical: Vec<RecExpr<SymbolLang>>,
+    pub saturated: bool,
+    pub nodes: usize,
+    pub iterations: usize,
+}
+pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
+    let mut runner = Runner::<SymbolLang, Facts, ()>::default()
+        .with_iter_limit(60)
+        .with_node_limit(10000)
+        .with_time_limit(Duration::from_millis(50))
+        .with_scheduler(SimpleScheduler);
+    for source in sources {
+        runner = runner.with_expr(&crate::frontend::parse(source)?);
+    }
+    let r = runner.run(rules());
+    let roots: Vec<_> = r.roots.iter().map(|&id| r.egraph.find(id)).collect();
+    let extractor = Extractor::new(&r.egraph, Cost);
+    let canonical = roots.iter().map(|&id| extractor.find_best(id).1).collect();
+    Ok(JointEvaluation {
+        roots,
+        canonical,
+        saturated: matches!(r.stop_reason, Some(StopReason::Saturated)),
+        nodes: r.egraph.total_size(),
+        iterations: r.iterations.len(),
+    })
+}
+// Append(xs, Nil) merges with xs. Opening that cyclic representative again creates
+// redundant bounds/absence branches; the identity rules already cover it completely.
+fn non_nil(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| !has(g, s[a], "Nil")
+}
+
+// Substitution into an already canonical affine body does not need intermediate Lets.
+// Atoms containing a binder anywhere but a Var must use capture-checked substitution.
+fn substitute_affine(g: &Graph, body: Id, bindings: &[(Id, Id)]) -> Option<Form> {
+    let f = form(g, body);
+    let mut result = Form::constant(f.constant);
+    for (atom, coefficient) in f.terms {
+        let mut replacement = Form::atom(atom);
+        for &(var, value) in bindings {
+            if g[atom]
+                .nodes
+                .iter()
+                .any(|n| op(n) == "Var" && n.children[0] == var)
+            {
+                replacement = form(g, value);
+                break;
+            }
+            if g[atom].data.free.contains(&var) {
+                return None;
+            }
+        }
+        result = result.plus(&replacement, coefficient)?;
+    }
+    Some(result)
+}

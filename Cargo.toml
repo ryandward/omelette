@@ -2,6 +2,12 @@
 name = "omelette"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 
 [dependencies]
-egglog = "3.0.0"
+egg = "0.11"
+oxc_allocator = "0.157"
+oxc_ast = "0.157"
+oxc_parser = "0.157"
+oxc_span = "0.157"
+oxc_syntax = "0.157"
