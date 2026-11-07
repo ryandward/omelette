@@ -12,6 +12,7 @@ impl<'a> Lowerer<'a, '_> {
         self.lift2(list, index, Family::Propagate, &mut |l, list, index| l.read_plain(list, &index))
     }
     fn read_plain(&mut self, list: Val<'a>, index: &Val<'a>) -> Val<'a> {
+        let list = self.deref(list);
         let Val::Num(f) = index else {
             return match (&list, index) {
                 (Val::Throw | Val::Undef, _) | (_, Val::Throw) => Val::Throw,
@@ -132,7 +133,7 @@ impl<'a> Lowerer<'a, '_> {
     pub fn seq(&mut self, items: &Rc<Vec<Val<'a>>>) -> Seq {
         let list = Val::List(items.clone());
         let elements = list.items().unwrap_or(Items::Any);
-        Seq { id: self.b.emit(&list), items: elements }
+        Seq { id: self.emit(&list), items: elements }
     }
     /// The element of a list of at most one element: absent, or the element if kept.
     pub fn short_element(&mut self, s: &Short<'a>) -> Val<'a> {
@@ -167,6 +168,7 @@ impl<'a> Lowerer<'a, '_> {
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and
     /// possibly undefined for a value of unknown type.
     fn length(&mut self, v: Val<'a>) -> Val<'a> {
+        let v = self.deref(v);
         match v {
             Val::Undef | Val::Throw => Val::Throw,
             Val::List(items) => Val::int(i64::try_from(items.len()).unwrap_or(i64::MAX)),
@@ -207,7 +209,7 @@ impl<'a> Lowerer<'a, '_> {
                     (Val::List(x), y) if x.is_empty() => y,
                     (x, Val::List(y)) if y.is_empty() => x,
                     (a, b) => {
-                        let (a, b) = (l.b.emit(&a), l.b.emit(&b));
+                        let (a, b) = (l.emit(&a), l.emit(&b));
                         Seq { id: l.b.add(Core::Append([a, b])), items: x.both(y) }.val()
                     }
                 },
@@ -220,6 +222,10 @@ impl<'a> Lowerer<'a, '_> {
     /// iterable, an uninterpreted list that leaves the expression opaque.
     pub fn iterate(&mut self, v: Val<'a>) -> Val<'a> {
         match v {
+            Val::Ref(_) => {
+                let contents = self.deref(v);
+                self.iterate(contents)
+            }
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             Val::Str(s) => Val::List(Rc::new(code_points(&s.units()).into_iter().map(Val::Str).collect())),
             Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::Defined)),

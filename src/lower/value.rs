@@ -1,7 +1,7 @@
 //! The static value domain of the partial evaluator.
 use crate::affine::Form;
 use crate::core::{Family, Kind, Utf16};
-use egg::Id;
+use egg::{Id, Symbol};
 use oxc_ast::ast::{Expression, FormalParameters, FunctionBody};
 use oxc_semantic::SymbolId;
 use std::collections::HashMap;
@@ -83,6 +83,20 @@ pub enum Val<'a> {
     Fun(Rc<Fun<'a>>),
     Term(Id, Ty),
     Split(Rc<Split<'a>>),
+    /// An array with identity: one the caller holds, or one this expression allocated and
+    /// bound. Its contents live in the lowerer's store, so every alias sees a mutation.
+    Ref(RefKey),
+}
+
+/// The identity of an array a mutation can reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RefKey {
+    /// A free list variable: the caller holds it, so mutating it is observable.
+    Input(Symbol),
+    /// An array this expression allocated, then bound to a name or put in a list.
+    Local(u32),
+    /// One of two references, chosen by a symbolic test.
+    Choice(usize),
 }
 
 /// A value that depends on whether `read` is present: `absent` where it is missing, and
@@ -151,6 +165,7 @@ impl Val<'_> {
             (Self::Fun(a), Self::Fun(b)) => Rc::ptr_eq(a, b),
             (Self::Split(a), Self::Split(b)) => Rc::ptr_eq(a, b),
             (Self::Term(a, _), Self::Term(b, _)) => a == b,
+            (Self::Ref(a), Self::Ref(b)) => a == b,
             _ => false,
         }
     }
@@ -176,7 +191,9 @@ impl Val<'_> {
     pub fn defined(&self) -> bool {
         match self {
             Self::Undef | Self::Throw | Self::Split(_) | Self::Term(_, Ty::Any) => false,
-            Self::NaN | Self::Bool(_) | Self::Num(_) | Self::Str(_) | Self::List(_) | Self::Short(_) | Self::Fun(_) | Self::Term(..) => true,
+            Self::NaN | Self::Bool(_) | Self::Num(_) | Self::Str(_) | Self::List(_) | Self::Short(_) | Self::Fun(_) | Self::Term(..) | Self::Ref(_) => {
+                true
+            }
         }
     }
     /// Whether this is a known value lowering can compute with.

@@ -1,7 +1,7 @@
 //! Expressions: symbols, operators, branches, and literals.
 use super::Lowerer;
 use super::ops::Bin;
-use super::value::{Body, Fun, Items, Ty, Val};
+use super::value::{Body, Fun, RefKey, Ty, Val};
 use crate::affine::Form;
 use crate::core::{Core, Family, Kind, Utf16};
 use egg::Id;
@@ -87,7 +87,7 @@ impl<'a> Lowerer<'a, '_> {
         let var = self.b.var(kind, name);
         match kind {
             Kind::Int => Val::Num(Form::atom(var)),
-            Kind::List => Val::Term(var, Ty::List(Items::Defined)),
+            Kind::List => Val::Ref(RefKey::Input(egg::Symbol::from(name))),
             Kind::Fun => Val::Term(var, Ty::Defined),
             _ => Val::Term(var, Ty::Any),
         }
@@ -142,7 +142,11 @@ impl<'a> Lowerer<'a, '_> {
             let (v, s) = match element {
                 ArrayExpressionElement::SpreadElement(s) => (self.expr(&s.argument), true),
                 ArrayExpressionElement::Elision(_) => return self.unsupported(),
-                e => (self.expr(e.to_expression()), false),
+                e => {
+                    // An array inside an array keeps its identity.
+                    let v = self.expr(e.to_expression());
+                    (self.own(v), false)
+                }
             };
             values.push(v);
             spread.push(s);
@@ -250,8 +254,12 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         if yes.identical(no) || (yes.is_known() && super::ops::same(yes, no) == Some(true)) {
             return yes.clone();
         }
+        // Choosing an array with identity keeps its identity.
+        if matches!(yes, Val::Ref(_)) || matches!(no, Val::Ref(_)) {
+            return self.choice(test.clone(), yes.clone(), no.clone());
+        }
         let ty = join(yes, no);
-        let (c, y, n) = (self.b.emit(test), self.b.emit(yes), self.b.emit(no));
+        let (c, y, n) = (self.emit(test), self.emit(yes), self.emit(no));
         let id = self.b.add(Core::If([c, y, n]));
         match ty {
             None => Val::Num(Form::atom(id)),

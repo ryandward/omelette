@@ -134,6 +134,7 @@ impl<'a> Lowerer<'a, '_> {
     /// `a + b`: concatenation when an operand is a string or a list, and otherwise numeric
     /// addition with booleans coerced.
     fn add(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
+        let (a, b) = (self.deref(a), self.deref(b));
         if is_text(&a) || is_text(&b) || a.items().is_some() || b.items().is_some() {
             let (a, b) = (self.to_text(a), self.to_text(b));
             return self.concat(&a, &b);
@@ -198,7 +199,7 @@ impl<'a> Lowerer<'a, '_> {
         if distinct_types(a, b) {
             return Val::Bool(false);
         }
-        let (x, y) = (self.b.emit(a), self.b.emit(b));
+        let (x, y) = (self.emit(a), self.emit(b));
         Val::Term(self.b.add(Core::Eq([x, y])), Ty::Bool)
     }
     pub fn and(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
@@ -206,7 +207,7 @@ impl<'a> Lowerer<'a, '_> {
             (Val::Bool(false), _) | (_, Val::Bool(true)) => a,
             (Val::Bool(true), _) | (_, Val::Bool(false)) => b,
             _ => {
-                let (x, y) = (self.b.emit(&a), self.b.emit(&b));
+                let (x, y) = (self.emit(&a), self.emit(&b));
                 Val::Term(self.b.add(Core::And([x, y])), Ty::Bool)
             }
         }
@@ -216,7 +217,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Bool(b) => Val::Bool(!b),
             Val::Throw => Val::Throw,
             t => {
-                let id = l.b.emit(&t);
+                let id = l.emit(&t);
                 Val::Term(l.b.add(Core::Not(id)), Ty::Bool)
             }
         })
@@ -231,7 +232,7 @@ impl<'a> Lowerer<'a, '_> {
                 None => self.nonzero(&f),
             },
             Val::Str(s) => Val::Bool(!s.units().is_empty()),
-            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List(_)) => Val::Bool(true),
+            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Val::Bool(true),
             Val::Term(_, Ty::Str) => {
                 let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
@@ -244,7 +245,7 @@ impl<'a> Lowerer<'a, '_> {
         let below = f.scale(-1).and_then(|g| g.plus(&Form::constant(1), -1)).map(|g| self.b.nonnegative(&g));
         match (above, below) {
             (Some(x), Some(y)) => {
-                let (x, y) = (self.b.emit(&x), self.b.emit(&y));
+                let (x, y) = (self.emit(&x), self.emit(&y));
                 Val::Term(self.b.add(Core::Or([x, y])), Ty::Bool)
             }
             _ => self.dynamic("truthy", &[&Val::Num(f.clone())], Ty::Bool),
@@ -255,6 +256,7 @@ impl<'a> Lowerer<'a, '_> {
 impl<'a> Lowerer<'a, '_> {
     pub fn to_text(&mut self, v: Val<'a>) -> Val<'a> {
         let text = |s: &str| Val::Str(Utf16::new(s.encode_utf16()));
+        let v = self.deref(v);
         match v {
             Val::Str(_) | Val::Term(_, Ty::Str) | Val::Throw => v,
             Val::Undef => text("undefined"),
@@ -271,7 +273,7 @@ impl<'a> Lowerer<'a, '_> {
             (Val::Throw, _) | (_, Val::Throw) => Val::Throw,
             (Val::Str(x), Val::Str(y)) => Val::Str(x.concat(*y)),
             _ => {
-                let (x, y) = (self.b.emit(a), self.b.emit(b));
+                let (x, y) = (self.emit(a), self.emit(b));
                 Val::Term(self.b.add(Core::Concat([x, y])), Ty::Str)
             }
         }
@@ -279,7 +281,7 @@ impl<'a> Lowerer<'a, '_> {
     /// An operation lowering resolved to no known type; it never yields undefined.
     pub fn dynamic(&mut self, name: &str, args: &[&Val<'a>], ty: Ty) -> Val<'a> {
         let mut children = vec![self.b.text(Utf16::new(name.encode_utf16()))];
-        children.extend(args.iter().map(|v| self.b.emit(v)));
+        children.extend(args.iter().map(|v| self.emit(v)));
         let node = if ty == Ty::Any { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
         Val::Term(self.b.add(node), ty)
     }
@@ -312,9 +314,15 @@ fn numeric_typed(v: &Val<'_>) -> bool {
 
 /// Strict equality of two objects lowering built: the same object, or two different ones.
 fn identical_object(a: &Val<'_>, b: &Val<'_>) -> Option<bool> {
+    use super::value::RefKey;
+    let fresh = |v: &Val<'_>| matches!(v, Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)));
     match (a, b) {
         (Val::List(x), Val::List(y)) => Some(Rc::ptr_eq(x, y)),
         (Val::Fun(x), Val::Fun(y)) => Some(Rc::ptr_eq(x, y)),
+        (Val::Ref(x), Val::Ref(y)) if x == y => Some(true),
+        // A local array is a new object, and so is an array just built.
+        (Val::Ref(RefKey::Local(_)), Val::Ref(_)) | (Val::Ref(_), Val::Ref(RefKey::Local(_))) => Some(false),
+        (Val::Ref(_), v) | (v, Val::Ref(_)) if fresh(v) => Some(false),
         _ => None,
     }
 }
@@ -342,7 +350,7 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
         Val::Str(_) | Val::Term(_, Ty::Str) => Some(1),
         Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(2),
         Val::Undef => Some(3),
-        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => Some(4),
+        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Some(4),
         Val::Term(_, Ty::Defined) => Some(5),
         _ => None,
     };

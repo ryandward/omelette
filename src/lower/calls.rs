@@ -54,8 +54,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| l.invoke(f, args.clone())),
             callee => {
                 self.opaque = true;
-                let mut children = vec![self.b.emit(&callee)];
-                children.extend(args.iter().map(|a| self.b.emit(a)));
+                let mut children = vec![self.emit(&callee)];
+                children.extend(args.iter().map(|a| self.emit(a)));
                 Val::Term(self.b.add(Core::Call(children.into())), Ty::Any)
             }
         }
@@ -88,6 +88,8 @@ impl<'a> Lowerer<'a, '_> {
     fn bind(&mut self, pattern: &'a BindingPattern<'a>, value: Val<'a>) -> bool {
         match pattern {
             BindingPattern::BindingIdentifier(id) => {
+                // A bound array has an identity its aliases share.
+                let value = self.own(value);
                 self.env.insert(id.symbol_id(), value);
                 true
             }
@@ -174,7 +176,17 @@ impl<'a> Lowerer<'a, '_> {
             if l.bind(&first.id, value.remove(0)) { l.declare(others, rest) } else { l.unsupported() }
         })
     }
+    /// A method on a receiver: its contents decide the dispatch, and its callbacks receive the
+    /// receiver itself.
     fn method(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
+        let this = receiver.clone();
+        let receiver = self.deref(receiver);
+        let saved = self.this.replace(this);
+        let out = self.dispatch(receiver, name, args);
+        self.this = saved;
+        out
+    }
+    fn dispatch(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         if receiver.items().is_some()
             && let Some(early) = self.precheck(&receiver, name, args)
         {
@@ -221,7 +233,7 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// The callback applied to every (element, index, list).
     fn each(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Vec<Val<'a>> {
-        let list = Val::List(items.clone());
+        let list = self.this_or(Val::List(items.clone()));
         let indexed = items.iter().cloned().zip(0_i64..);
         indexed.map(|(x, k)| self.apply(f.clone(), vec![x, Val::int(k), list.clone()])).collect()
     }
@@ -237,7 +249,7 @@ impl<'a> Lowerer<'a, '_> {
         self.lift(v, Family::Sink, &mut |l, v| l.truthy(v))
     }
     fn fold_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
-        let list = Val::List(items.clone());
+        let list = self.this_or(Val::List(items.clone()));
         let mut rest = items.iter().cloned().zip(0_i64..);
         let Some(mut acc) = init.or_else(|| rest.next().map(|(x, _)| x)) else { return Val::Throw };
         for (x, k) in rest {
@@ -286,6 +298,7 @@ impl<'a> Lowerer<'a, '_> {
     /// flat spreads a list element one level and keeps any other element.
     fn spread(&mut self, v: Val<'a>) -> Val<'a> {
         self.lift(v, Family::Container, &mut |l, v| match v {
+            Val::Ref(_) => l.deref(v),
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v])),
             v => l.dynamic("spread", &[&v], Ty::List(Items::Any)),
@@ -308,7 +321,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 let every = name == "every";
                 let unit = Val::Bool(every);
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| {
-                    let v = l.apply(f.clone(), vec![x, Val::int(0), Val::Short(s.clone())]);
+                    let array = l.this_or(Val::Short(s.clone()));
+                    let v = l.apply(f.clone(), vec![x, Val::int(0), array]);
                     l.truthy_split(v)
                 })
             }
@@ -316,7 +330,10 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 let init = args.get(1).cloned();
                 let unit = init.clone().unwrap_or(Val::Throw);
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| match &init {
-                    Some(z) => l.apply(f.clone(), vec![z.clone(), x, Val::int(0), Val::Short(s.clone())]),
+                    Some(z) => {
+                        let array = l.this_or(Val::Short(s.clone()));
+                        l.apply(f.clone(), vec![z.clone(), x, Val::int(0), array])
+                    }
                     None => x,
                 })
             }
@@ -356,7 +373,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         let (world, read_list) = (Val::Term(s.var, s.items.ty()), self.slot_list(s));
         let applied = self.within(s.read, world, |l| {
             l.walking.push(read_list);
-            let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), Val::Short(s.clone())]);
+            let array = l.this_or(Val::Short(s.clone()));
+            let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), array]);
             l.walking.pop();
             out
         });
@@ -398,7 +416,7 @@ impl<'a> Lowerer<'a, '_> {
             "reduce" => self.reduce(list, &f, args.get(1).cloned()),
             "join" => {
                 let sep = self.separator(args.first().cloned());
-                let sep = self.b.emit(&sep);
+                let sep = self.emit(&sep);
                 Val::Term(self.b.add(Core::Join([sep, list.id])), Ty::Str)
             }
             // A nested element's own elements are not covered by the precondition.
@@ -421,7 +439,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Fun(_) => self.callback(kind, f, list),
             other => {
                 self.opaque = true;
-                (self.b.emit(other), Items::Any)
+                (self.emit(other), Items::Any)
             }
         };
         let node = self.b.add(match kind {
@@ -439,7 +457,7 @@ impl<'a> Lowerer<'a, '_> {
     fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> (Id, Items) {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
-        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
+        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
         let result = self.apply(f.clone(), args);
         self.walking.pop();
@@ -448,14 +466,14 @@ impl<'a> Lowerer<'a, '_> {
             self.escape(&result)
         } else {
             let truth = self.truthy_split(result);
-            self.b.emit(&truth)
+            self.emit(&truth)
         };
         (self.b.add(Core::Lam(vec![x, i, body].into())), items)
     }
     /// A possibly missing read at another collection's coordinate, left as a hole in a
     /// collection shaped like the walked one.
     fn escape(&mut self, v: &Val<'a>) -> Id {
-        let id = self.b.emit(v);
+        let id = self.emit(v);
         match v {
             Val::Split(s) if s.drift && matches!(s.absent, Val::Undef) => {
                 let has = self.b.has(s.read);
@@ -511,7 +529,7 @@ impl<'a> Lowerer<'a, '_> {
     fn projected_index(&mut self, fun: &Fun<'a>, list: Seq, target: &'a Expression<'a>) -> Option<(Form, Id)> {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         let (saved, opaque) = (std::mem::replace(&mut self.env, fun.env.clone()), self.opaque);
-        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
+        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         let bound = self.bind_params(fun, args);
         let value = bound.then(|| self.expr(target));
         // Recognizing a projection evaluates nothing; the walker that replaces it does.
@@ -522,7 +540,7 @@ impl<'a> Lowerer<'a, '_> {
         }
         self.coords.insert(i, list.id);
         let test = self.strict_eq(&Val::Num(Form::atom(i)), &Val::Num(form.clone()));
-        let body = self.b.emit(&test);
+        let body = self.emit(&test);
         Some((form, self.b.add(Core::Lam(vec![x, i, body].into()))))
     }
 }
@@ -543,12 +561,13 @@ impl<'a> Lowerer<'a, '_> {
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
             x => {
-                let out = l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x.clone(), Val::Num(final_index.clone()), list.val()]);
+                let array = l.this_or(list.val());
+                let out = l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x.clone(), Val::Num(final_index.clone()), array]);
                 returns_element &= out.identical(&x);
                 out
             }
         });
-        let id = self.b.emit(&body);
+        let id = self.emit(&body);
         if self.b.mentions(id, acc) || (init.is_none() && !returns_element) {
             return self.fold(list, &f, init);
         }
@@ -562,14 +581,14 @@ impl<'a> Lowerer<'a, '_> {
         }
         let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
-        let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
+        let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
         let body = self.apply(f.clone(), args);
         self.walking.pop();
-        let body = self.b.emit(&body);
+        let body = self.emit(&body);
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
         let init = match init {
-            Some(z) => self.b.emit(&z),
+            Some(z) => self.emit(&z),
             None => self.b.add(Core::Throw),
         };
         Val::Term(self.b.add(Core::Fold([lam, init, list.id])), Ty::Any)
@@ -625,9 +644,9 @@ impl<'a> Lowerer<'a, '_> {
     fn concat_list(&mut self, list: Val<'a>, items: &[Val<'a>]) -> Val<'a> {
         let mut out = self.append(list, Val::empty());
         for item in items {
-            let item = match item {
-                Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => item.clone(),
-                v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v.clone()])),
+            let item = match self.deref(item.clone()) {
+                item @ (Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_))) => item,
+                v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v])),
                 _ => return self.unsupported(),
             };
             out = self.append(out, item);
@@ -638,7 +657,7 @@ impl<'a> Lowerer<'a, '_> {
 
 /// A value calling which certainly throws.
 fn not_callable(v: &Val<'_>) -> bool {
-    matches!(v, Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Str(_) | Val::List(_) | Val::Short(_))
+    matches!(v, Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Str(_) | Val::List(_) | Val::Short(_) | Val::Ref(_))
         || matches!(v, Val::Term(_, Ty::Bool | Ty::Str | Ty::List(_)))
 }
 

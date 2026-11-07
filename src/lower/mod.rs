@@ -5,6 +5,7 @@ mod calls;
 mod expr;
 mod lists;
 mod ops;
+mod refs;
 mod usage;
 mod value;
 
@@ -62,7 +63,7 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .map(|(program, semantic)| {
             let mut lowerer = Lowerer::new(semantic.scoping(), &kinds);
             let value = lowerer.expr(expression(program));
-            let root = lowerer.b.emit(&value);
+            let root = lowerer.emit(&value);
             Lowered { expr: lowerer.b.finish(root), opaque: lowerer.opaque }
         })
         .collect())
@@ -106,6 +107,14 @@ pub struct Lowerer<'a, 'l> {
     depth: usize,
     /// See [`Lowered::opaque`].
     opaque: bool,
+    /// The store and effect log along the path being lowered.
+    state: refs::State<'a>,
+    /// Each choice reference's test and alternatives.
+    choices: Vec<(Val<'a>, Val<'a>, Val<'a>)>,
+    /// The last local reference allocated.
+    next_ref: u32,
+    /// The receiver of the list method being lowered, which its callbacks receive.
+    this: Option<Val<'a>>,
 }
 
 impl<'l> Lowerer<'_, 'l> {
@@ -122,6 +131,10 @@ impl<'l> Lowerer<'_, 'l> {
             maps: HashMap::new(),
             depth: 0,
             opaque: false,
+            state: refs::State::default(),
+            choices: Vec::new(),
+            next_ref: 0,
+            this: None,
         }
     }
 }

@@ -94,6 +94,7 @@ impl Builder {
             Val::Fun(_) => self.unsupported(),
             Val::Term(id, _) => *id,
             Val::Split(s) => self.split(s),
+            Val::Ref(_) => unreachable!("lowering resolves references before emitting"),
         }
     }
     fn list(&mut self, items: &[Val<'_>]) -> Id {
