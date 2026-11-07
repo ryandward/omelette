@@ -15,6 +15,7 @@ pub struct Findings {
 }
 
 pub fn scan(g: &Graph, root: Id) -> Findings {
+    let known = known(g);
     let mut found = Findings::default();
     let mut seen = HashSet::new();
     let mut stack = vec![root];
@@ -28,7 +29,7 @@ pub fn scan(g: &Graph, root: Id) -> Findings {
             visit(g, n, &mut found);
         }
         for group in witnesses(g, id).values() {
-            judge(g, group, &mut found);
+            judge(g, &known, group, &mut found);
         }
     }
     found
@@ -60,9 +61,9 @@ fn witnesses(g: &Graph, id: Id) -> HashMap<Id, Vec<[Id; 4]>> {
 
 /// Witnesses in one class over one read denote one value, so their replacements agree
 /// where the read is missing and their present branches agree on every element: one
-/// representative's proof that the branch ignores the element, or that the replacement is
-/// certainly a value, holds for all of them.
-fn judge(g: &Graph, group: &[[Id; 4]], found: &mut Findings) {
+/// representative's proof that the branch ignores the element, that it is free of unknowns,
+/// or that the replacement is certainly a value, holds for all of them.
+fn judge(g: &Graph, known: &HashSet<Id>, group: &[[Id; 4]], found: &mut Findings) {
     let read = group[0][3];
     if !undetermined(g, read) {
         return;
@@ -80,10 +81,35 @@ fn judge(g: &Graph, group: &[[Id; 4]], found: &mut Findings) {
     if observed || visible {
         return;
     }
-    if group.iter().any(|&[_, z, ..]| certain(g, z)) {
+    // An unknown function or value may make the branch ignore the element (`p = () => false`)
+    // or test its presence (`p = () => true`, or `n === x` with `x` undefined).
+    let resolved = group.iter().any(|&[_, _, lam, _]| bodies(g, lam).any(|body| known.contains(&g.find(body))));
+    if resolved && group.iter().any(|&[_, z, ..]| certain(g, z)) {
         found.families.extend(swallowing);
     } else {
         found.possible = true;
+    }
+}
+
+/// Classes with a representative free of unknowns: unresolved calls, unsupported syntax, and
+/// free variables that may be any value or any function.
+fn known(g: &Graph) -> HashSet<Id> {
+    let mut known = HashSet::new();
+    loop {
+        let before = known.len();
+        for class in g.classes() {
+            let free = |n: &Core| {
+                !matches!(n, Core::Call(_) | Core::Unsupported(_))
+                    && !matches!(n, Core::Var(v) if matches!(v.kind, Kind::Any | Kind::Fun))
+                    && n.children().iter().all(|&c| known.contains(&g.find(c)))
+            };
+            if !known.contains(&class.id) && class.nodes.iter().any(free) {
+                known.insert(class.id);
+            }
+        }
+        if known.len() == before {
+            return known;
+        }
     }
 }
 

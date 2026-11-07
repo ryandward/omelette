@@ -36,7 +36,7 @@ fn print(r: &Evaluation, all: bool) {
         r.stop
     );
     println!("root: {}", r.canonical);
-    println!("consistency: {}", if r.consistent { "ok" } else { "UNSOUND" });
+    println!("consistency: {}", consistency(r.consistent));
     let families: Vec<String> = r.families.iter().map(ToString::to_string).collect();
     if families.is_empty() {
         println!("verdict: {}", r.verdict);
@@ -54,6 +54,7 @@ fn print_joint(exprs: &[&str]) -> ExitCode {
     match evaluate_joint(exprs) {
         Ok(r) => {
             println!("joint: {} iterations, {} e-nodes, saturated: {}", r.iterations, r.nodes, r.saturated);
+            println!("consistency: {}", consistency(r.consistent));
             for ((src, id), term) in exprs.iter().zip(&r.roots).zip(&r.canonical) {
                 println!("c{id}: {src}\n  {term}");
             }
@@ -64,4 +65,8 @@ fn print_joint(exprs: &[&str]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn consistency(consistent: bool) -> &'static str {
+    if consistent { "ok" } else { "inconsistent" }
 }

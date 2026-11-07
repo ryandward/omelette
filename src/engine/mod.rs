@@ -154,11 +154,14 @@ pub struct JointEvaluation {
     pub roots: Vec<Id>,
     pub canonical: Vec<RecExpr<Core>>,
     pub saturated: bool,
+    /// An inconsistent graph proves any two roots equal, so its classes prove nothing.
+    pub consistent: bool,
     pub nodes: usize,
     pub iterations: usize,
 }
 
-/// Saturate expressions that share their free variables in one graph.
+/// Saturate expressions that share their free variables in one graph. Each free variable
+/// gets one precondition from its uses across all the expressions.
 ///
 /// # Errors
 /// A syntax error, or a source that is not a single expression.
@@ -174,6 +177,7 @@ pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
         canonical: roots.iter().map(|&id| extractor.find_best(id).1).collect(),
         roots,
         saturated: matches!(run.stop_reason, Some(StopReason::Saturated)),
+        consistent: run.egraph.classes().all(|c| !c.data.clash),
         nodes: run.egraph.total_size(),
         iterations: run.iterations.len(),
     })

@@ -101,3 +101,19 @@ fn an_index_inside_parentheses_or_a_type_assertion_is_still_an_index() {
         cheat(source, &[Family::Sink]);
     }
 }
+
+#[test]
+fn an_unknown_in_the_present_branch_leaves_the_witness_undecided() {
+    // `p = () => false` ignores the element; `p = () => true` and `x = undefined` test presence.
+    for source in [
+        "xs.slice(i, i + 1).some(p)",
+        "xs.slice(i, i + 1).every((n) => n === x)",
+        "xs.slice(i, i + 1).reduce(f, 0)",
+        "xs.slice(i, i + 1).flatMap(f)",
+    ] {
+        checked(source, Verdict::Undecided);
+    }
+    // A one-element join never writes its separator.
+    cheat("xs.slice(i, i + 1).join(s)", &[Family::Unit]);
+    cheat("xs.slice(i, i + 1).every((n) => n > k)", &[Family::Unit]);
+}
