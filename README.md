@@ -1,6 +1,6 @@
-# omlette
+# omelette
 
-This is an equality-saturation probe for absence laundering in TypeScript. Laundering is a total-typed expression that quietly turns a missing value into a default, such as `widths.slice(i, i + 1).reduce((_, x) => x, 0)`. The type checker sees `number` and has nothing to say. omlette tries to prove that the reader decomposes into `maybe(default, index?(xs, k))`, an absent read eliminated with a value the program wrote.
+This is an equality-saturation probe for absence laundering in TypeScript. Laundering is a total-typed expression that quietly turns a missing value into a default, such as `widths.slice(i, i + 1).reduce((_, x) => x, 0)`. The type checker sees `number` and has nothing to say. omelette tries to prove that the reader decomposes into `maybe(default, index?(xs, k))`, an absent read eliminated with a value the program wrote.
 
 The pipeline has two parts:
 
