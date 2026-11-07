@@ -347,6 +347,10 @@ fn not_free(acc: &str, body: &str) -> impl Fn(&mut G, Id, &Subst) -> bool {
     let (acc, body): (Var, Var) = (acc.parse().unwrap(), body.parse().unwrap());
     move |eg, _, s| !eg[s[body]].data.free.contains(&s[acc])
 }
+fn index_only(e: &str, idx: &str, j: &str) -> impl Fn(&mut G, Id, &Subst) -> bool {
+    let (e, idx, j): (Var, Var, Var) = (e.parse().unwrap(), idx.parse().unwrap(), j.parse().unwrap());
+    move |eg, _, s| { let f = &eg[s[j]].data.free; !f.contains(&s[e]) && !f.contains(&s[idx]) && eg.find(s[e]) != eg.find(s[idx]) }
+}
 fn is_int(v: &str) -> impl Fn(&mut G, Id, &Subst) -> bool {
     let v: Var = v.parse().unwrap();
     move |eg, _, s| matches!(eg[s[v]].data.constant, Some(Const::Int(_)))
@@ -378,6 +382,9 @@ fn rules() -> Vec<Rewrite<SymbolLang, Js>> {
         rewrite!("map-method"; "(mcall map ?xs ?f)" => "(map ?f ?xs)"),
         // filter calls back with (element, index); filteri carries the index.
         rewrite!("filter"; "(mcall filter ?xs ?f)" => "(filteri ?f 0 ?xs)"),
+        // find (ECMA-262 23.1.3.9) calls back with (element, index) and returns the first match,
+        // or undefined: the first element of the filtered list.
+        rewrite!("find"; "(mcall find ?xs ?f)" => "(index? (filteri ?f 0 ?xs) 0)"),
         rewrite!("concat"; "(mcall concat ?xs ?ys)" => "(append ?xs ?ys)"),
         rewrite!("toReversed"; "(mcall toReversed ?xs)" => "(reverse ?xs)"),
         rewrite!("truthy-len"; "(truthy (len ?xs))" => "(< 0 (len ?xs))"),
@@ -432,6 +439,10 @@ fn rules() -> Vec<Rewrite<SymbolLang, Js>> {
         rewrite!("at-reverse"; "(at (reverse ?xs) ?k)" => "(if (&& (<= 0 ?k) (< ?k (len ?xs))) (at ?xs (- (- (len ?xs) 1) ?k)) oob)"),
         rewrite!("filteri-nil"; "(filteri ?f ?k nil)" => "nil"),
         rewrite!("filteri-cons"; "(filteri ?f ?k (cons ?h ?t))" => "(if (truthy (app (app ?f ?h) ?k)) (cons ?h (filteri ?f (+ ?k 1) ?t)) (filteri ?f (+ ?k 1) ?t))"),
+        // A predicate that tests only "index === j" (j reads neither the element nor the index)
+        // keeps exactly the element at index j: filteri started at index k over xs keeps
+        // xs[j - k] when k <= j < k + len xs, and nothing otherwise.
+        rewrite!("filteri-index-eq"; "(filteri (lam ?e (lam ?idx (=== (var ?idx) ?j))) ?k ?xs)" => "(if (&& (<= ?k ?j) (< ?j (+ ?k (len ?xs)))) (cons (at ?xs (- ?j ?k)) nil) nil)" if index_only("?e", "?idx", "?j")),
         rewrite!("filteri-if"; "(filteri ?f ?k (if ?c ?a ?b))" => "(if ?c (filteri ?f ?k ?a) (filteri ?f ?k ?b))"),
         rewrite!("index?-if"; "(index? (if ?c ?a ?b) ?k)" => "(if ?c (index? ?a ?k) (index? ?b ?k))"),
         // --- fold ---
