@@ -11,4 +11,4 @@ No CPU pinning, no result cache, no Node.js or tsc
 Threshold checks: per-case p95 parse <50 us, parse/lower <50 us, total <1000 us, nodes <150
 rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)
 cargo 1.99.1 (5f94df478 2026-08-27) (Arch Linux rust 1:1.99.1-1)
-Recorded: 2026-11-07 06:24:06 UTC
+Recorded: 2026-11-07 06:32:41 UTC

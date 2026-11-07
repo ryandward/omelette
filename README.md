@@ -49,6 +49,7 @@ The basis needs directed algebraic rules plus small interval and free-variable a
 - M1 recognizes `If(c, t, z)` where `c` is the presence test of a partial read `xs[k]`, found among the parents of `c` as the read's expansion `If(c, At(xs, k), Undef)`. When `t` is the read, it builds `Maybe(z, IndexQ(xs, k))`. When `t` is a defined value of the element, it abstracts `f = λx. t[xs[k] := x]` and builds `Maybe(z, IndexQ(Map(f, xs), k))`, stating the mapped read's expansion `If(c, t, Undef)` directly. It skips a constant `t` (that only observes absence, like `isNothing`) and a non-empty list against an empty `z` (`maybeToList`). The applier fires once per class and reports only changed unions.
 - `every`, `some`, and a filter's `length` over a list of at most one element become the callback on `xs[0]` when it exists and the empty-list answer (`true`, `false`, `0`) when it does not. Callbacks bind one parameter per argument and drop surplus arguments, as JavaScript does.
 - Definedness and resolution are analysis facts, not node shapes. A value is `defined` when it can never be `undefined` (numbers, booleans, strings, lists, comparisons). A list's `elements` are defined for input lists and literals of defined values, and for `Map(f, xs)` only when `f` provably `returns` a defined value; an in-bounds read `At` is exactly as defined as its list's elements. One rule drops `??` over a defined value, one rule folds `=== undefined` on a defined value to `false`, and M1, the cheat detector, and the consistency check read the same fact. A class is `opaque` when every representation holds unsupported syntax or an unresolved call, and a walker (`Map`, `Filteri`, `Foldl`, `Every`, `Some`) over a function it cannot apply is such a call. The verdict reads the root's opacity, and extraction prices those walkers like syntax.
+- A literal list decides a known position by itself: `at-cons` takes the one branch the index selects, so `[1, 2][0]` no longer builds `At(tail, -1)` and seeds dead reads down the list. The relational read lemmas (`prefix-last`, `short-last`, seeding a partial read) serve symbolic positions only, the short-list folds leave a literal `Cons` or `Nil` to the structural rules, and substituting into an affine sum yields a canonical sum rather than a `Lin` with constants as atoms. `[1, 2][0]` takes 38 e-nodes (was 76) and `[1, 2].reduce((a, b) => a + b, 0)` takes 59 (was 145).
 - Every callback a rule applies (`filter`, `reduce`, `map`, and the short `every`, `some`, and filter `length`) goes through one arity-aware helper, written `Call2(f, a, b)` in the rules. Concrete lists therefore evaluate with one-parameter callbacks too, and `map` passes the index. An unresolved callee stays `Call2`, which counts as unsupported syntax.
 - Distribution over a conditional (`at-if`, `filteri-if`, `strict-eq-if`, and the rest) never enters an `If` whose condition is decided. Its class already holds the live branch, and the dead branch could unfold forever: `[1, -1].filter((x, k) => x > 0)` re-filtered the list it had been proven empty against at every next index and hit the node limit. Comparison and negation rewrites also stop once a class's boolean value is known, integer equality on a live conditional is decided by distributing `===` into its branches instead of also expanding into `EqI`, and `!` is pushed into a conditional only when that conditional tests a read's presence, which is where a written absence answer becomes visible. `a && b` and `a || b` become `If(a, b, false)` and `If(a, true, b)` so both spellings of a presence test meet the same rules.
 
@@ -62,20 +63,20 @@ Recorded results (microseconds; total includes graph disposal):
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 4.0 µs |
-| Worst per-case parser + lowering p95 | 27.2 µs |
-| Worst per-case total p95 / p99 | 811.7 / 1,135.7 µs |
-| Largest total among 33,000 samples | 1,824.5 µs |
-| Worst string-case total p95 | 553.2 µs |
-| Worst `every`-case / `some`-case total p95 | 657.7 / 811.7 µs |
-| Worst unknown-callback-case total p95 | 534.0 µs |
-| Two-element sum total p50 / p95 | 145.4 / 191.6 µs |
+| Worst per-case parser p95 | 3.8 µs |
+| Worst per-case parser + lowering p95 | 19.5 µs |
+| Worst per-case total p95 / p99 | 786.6 / 946.8 µs |
+| Largest total among 33,000 samples | 2,077.0 µs |
+| Worst string-case total p95 | 498.6 µs |
+| Worst `every`-case / `some`-case total p95 | 613.8 / 786.6 µs |
+| Worst unknown-callback-case total p95 | 287.6 µs |
+| Two-element sum total p50 / p95 | 143.8 / 177.9 µs |
 | Two-element sum graph / iterations | 28 / 5 |
-| All-case graph sizes / iterations | 5–100 / 1–12 |
-| One-time runtime initialization | 1,226.1 µs |
-| First evaluation after initialization | 288.1 µs |
+| All-case graph sizes / iterations | 5–99 / 1–12 |
+| One-time runtime initialization | 1,240.5 µs |
+| First evaluation after initialization | 306.2 µs |
 
-These are measured samples on this host, not scheduling guarantees. The worst case is `names.slice(i, i + 1).filter((n) => n === 'on').length !== 0` (99 e-nodes, 12 iterations); the worst p99 and the largest sample exceed 1 ms, while the p95 threshold holds. Reads of concrete literal lists are comparatively heavy: `[1, 2][0]` alone takes 76 e-nodes.
+These are measured samples on this host, not scheduling guarantees. The worst case is `names.slice(i, i + 1).filter((n) => n === 'on').length !== 0` (99 e-nodes, 12 iterations); every per-case p99 is under 1 ms, and the largest single sample (2.1 ms) is an outlier on that case.
 
 The `--check` option requires every case's parser and parser-plus-lowering p95 to be below 50 µs, total p95 below 1 ms, and graph size below 150 e-nodes. Ordinary tests assert correctness and graph bounds without wall-clock thresholds. `scripts/check.sh` also rejects non-saturated runs, including cases whose expected verdict is `UNDECIDED`.
 

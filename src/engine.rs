@@ -309,6 +309,13 @@ fn unbranched(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
 fn undecided() -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     |g, id, _| g[id].data.boolean.is_none()
 }
+fn unknown_length(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| {
+        g.lookup(SymbolLang::new("Len", vec![s[a]]))
+            .is_none_or(|len| num(g, len).is_none())
+    }
+}
 fn defined(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let a = v(a);
     move |g, _, s| g[s[a]].data.defined
@@ -624,6 +631,12 @@ impl Applier<SymbolLang, Facts> for Substitute {
                     };
                     g.add(SymbolLang::new("Let", vec![k[0], a, b]))
                 }
+                // An affine sum stays canonical: substitute its atoms, never nest a Lin in one.
+                _ if let Some(f) = Form::decode(&n)
+                    && let Some(f) = substitute_form(g, f, &[(var, e)]) =>
+                {
+                    add_form(g, f)
+                }
                 _ => {
                     let mut n = n.clone();
                     for c in &mut n.children {
@@ -713,7 +726,11 @@ impl Applier<SymbolLang, Facts> for SeedIndex {
         _: Option<&PatternAst<SymbolLang>>,
         _: Symbol,
     ) -> Vec<Id> {
-        let n = SymbolLang::new("IndexQ", vec![s[v("?xs")], s[v("?k")]]);
+        let (xs, k) = (s[v("?xs")], s[v("?k")]);
+        if num(g, k).is_some() && (has(g, xs, "Cons") || has(g, xs, "Nil")) {
+            return vec![]; // Presence is decided: at-cons walks the literal.
+        }
+        let n = SymbolLang::new("IndexQ", vec![xs, k]);
         if g.lookup(n.clone()).is_some() {
             return vec![];
         }
@@ -886,6 +903,45 @@ fn call(g: &mut Graph, f: Id, args: &[Id]) -> Id {
     }
     body
 }
+// xs[k] on a cons: the head at 0, the tail at k - 1 above it, nothing below. A known index
+// takes its one branch; building the dead ones seeded reads at -1, -2, ... down the list.
+#[derive(Clone)]
+struct AtCons;
+impl Applier<SymbolLang, Facts> for AtCons {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let (h, t, k) = (s[v("?h")], s[v("?t")], s[v("?k")]);
+        let tail = |g: &mut Graph| {
+            let k = form(g, k).plus(&Form::constant(1), -1)?;
+            let k = add_form(g, k);
+            Some(g.add(SymbolLang::new("At", vec![t, k])))
+        };
+        let out = match num(g, k) {
+            Some(0) => h,
+            Some(n) if n > 0 => match tail(g) {
+                Some(read) => read,
+                None => return vec![],
+            },
+            Some(_) => g.add(SymbolLang::leaf("Oob")),
+            None => {
+                let Some(read) = tail(g) else { return vec![] };
+                let zero = add_form(g, Form::constant(0));
+                let oob = g.add(SymbolLang::leaf("Oob"));
+                let at_head = g.add(SymbolLang::new("EqI", vec![k, zero]));
+                let head = g.add(SymbolLang::new("If", vec![at_head, h, oob]));
+                let above = g.add(SymbolLang::new("Lt", vec![zero, k]));
+                g.add(SymbolLang::new("If", vec![above, read, head]))
+            }
+        };
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
+}
 // A rule's callback application, Call2 f a b, reduced by the one arity-aware helper.
 #[derive(Clone)]
 struct Call2;
@@ -985,6 +1041,10 @@ fn not_identity(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
             .iter()
             .any(|n| op(n) == "Var" && n.children[0] == s[a])
     }
+}
+fn not_literal(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| !has(g, s[a], "Cons") && !has(g, s[a], "Nil")
 }
 fn not_cons(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let a = v(a);
@@ -1126,6 +1186,9 @@ impl Applier<SymbolLang, Facts> for ShortRead {
         _: Symbol,
     ) -> Vec<Id> {
         let xs = s[v("?xs")];
+        if num(g, s[v("?k")]).is_some() {
+            return vec![];
+        }
         let Some(len) = g.lookup(SymbolLang::new("Len", vec![xs])) else {
             return vec![];
         };
@@ -1182,7 +1245,9 @@ fn non_nil(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
 // Substitution into an already canonical affine body does not need intermediate Lets.
 // Atoms containing a binder anywhere but a Var must use capture-checked substitution.
 fn substitute_affine(g: &Graph, body: Id, bindings: &[(Id, Id)]) -> Option<Form> {
-    let f = form(g, body);
+    substitute_form(g, form(g, body), bindings)
+}
+fn substitute_form(g: &Graph, f: Form, bindings: &[(Id, Id)]) -> Option<Form> {
     let mut result = Form::constant(f.constant);
     for (atom, coefficient) in f.terms {
         let mut replacement = Form::atom(atom);

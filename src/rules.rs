@@ -8,6 +8,9 @@
 // a known constant can only gain more spellings of itself. Distribution never enters an If
 // whose condition is decided: its class already holds the live branch, and the dead branch
 // can unfold forever (a filter re-filtering the list it was proven empty against).
+// Relational read lemmas (prefix-last, short-last, seeding a partial read) serve symbolic
+// positions; at-cons decides a known position on a literal list by itself. Likewise the
+// short-list folds leave a literal Cons or Nil to foldl-cons, filteri-cons, and their nils.
 // Integer equality on a live conditional is decided by distributing === into its branches,
 // so it is not also expanded into EqI comparisons that cannot be decided.
 fn make_rules() -> Vec<Rule> {
@@ -17,7 +20,7 @@ fn make_rules() -> Vec<Rule> {
         rw!("select-first"; "(IndexQ (Select ?xs ?j) (Num 0))" => "(IndexQ ?xs ?j)"),
         rw!("select-first-total"; "(At (Select ?xs ?j) (Num 0))" => "(At ?xs ?j)"),
         rw!("append-default"; "(IndexQ (Append ?xs (Cons ?z ?tail)) (Num 0))" => "(Maybe ?z (IndexQ ?xs (Num 0)))"),
-        rw!("prefix-last"; "(IndexQ (Cons ?z ?xs) (Len ?xs))" => "(Maybe ?z (IndexQ ?xs (Sub (Len ?xs) (Num 1))))"),
+        rw!("prefix-last"; "(IndexQ (Cons ?z ?xs) (Len ?xs))" => "(Maybe ?z (IndexQ ?xs (Sub (Len ?xs) (Num 1))))" if unknown_length("?xs")),
         rw!("sublist-tail"; "(Sublist (Cons ?h ?t) (Num 1) (Len (Cons ?h ?t)))" => "?t"),
         rw!("short-last"; "(IndexQ ?xs ?k)" => ShortRead),
         rw!("prop"; "(Prop ?xs length)" => "(Len ?xs)"),
@@ -42,7 +45,7 @@ fn make_rules() -> Vec<Rule> {
         rw!("m-call1-some"; "(MCall1 some ?xs ?f)" => "(Some ?f (Num 0) ?xs)"),
         rw!("short-every"; "(Every ?f ?k ?xs)" => { Walk::Every }),
         rw!("short-some"; "(Some ?f ?k ?xs)" => { Walk::Some }),
-        rw!("short-count"; "(Len (Filteri ?f ?k ?xs))" => { Walk::Count } if not_cons("?xs")),
+        rw!("short-count"; "(Len (Filteri ?f ?k ?xs))" => { Walk::Count } if not_literal("?xs")),
         rw!("truthy-len"; "(Truthy (Len ?xs))" => "(Lt (Num 0) (Len ?xs))"),
         rw!("truthy-lt"; "(Truthy (Lt ?a ?b))" => "(Lt ?a ?b)"),
         rw!("truthy-le"; "(Truthy (Le ?a ?b))" => "(Le ?a ?b)"),
@@ -94,7 +97,7 @@ fn make_rules() -> Vec<Rule> {
         rw!("append-cons"; "(Append (Cons ?h ?t) ?b)" => "(Cons ?h (Append ?t ?b))"),
         rw!("append-if"; "(Append (If ?c ?a ?b) ?t)" => "(If ?c (Append ?a ?t) (Append ?b ?t))" if live("?c")),
         rw!("at-nil"; "(At (Nil) ?k)" => "(Oob)"),
-        rw!("at-cons"; "(At (Cons ?h ?t) ?k)" => "(If (Lt (Num 0) ?k) (At ?t (Sub ?k (Num 1))) (If (EqI ?k (Num 0)) ?h (Oob)))"),
+        rw!("at-cons"; "(At (Cons ?h ?t) ?k)" => AtCons),
         rw!("at-append"; "(At (Append ?a ?b) ?k)" => "(If (Lt ?k (Num 0)) (Oob) (If (Lt ?k (Len ?a)) (At ?a ?k) (At ?b (Sub ?k (Len ?a)))))" if non_nil("?a") if non_nil("?b")),
         rw!("at-sublist"; "(At (Sublist ?xs ?s ?e) ?k)" => "(If (And (Le (Num 0) ?k) (Lt ?k (Sub ?e ?s))) (At ?xs (Add ?s ?k)) (Oob))" if known("?s") if known("?e")),
         rw!("at-map"; "(At (Map ?f ?xs) ?k)" => "(If (And (Le (Num 0) ?k) (Lt ?k (Len ?xs))) (Call2 ?f (At ?xs ?k) ?k) (Oob))"),
@@ -128,7 +131,7 @@ fn make_rules() -> Vec<Rule> {
         rw!("normalize-le"; "(Le ?a ?b)" => { Compare(false) } if undecided()),
         rw!("relative-width"; "(Sub (Rel ?b ?n) (Rel ?a ?n))" => Width),
         rw!("sublist-width"; "(Sublist ?xs ?a ?b)" => SeedLength),
-        rw!("short-fold"; "(Foldl ?f ?z ?xs)" => ShortFold),
+        rw!("short-fold"; "(Foldl ?f ?z ?xs)" => ShortFold if not_literal("?xs")),
         rw!("let-substitute"; "(Let ?v ?e ?body)" => Substitute),
         rw!("normalize-affine"; "?x" => NormalizeAffine),
         rw!("F4"; "(Foldl (Lam ?acc (Lam ?v ?body)) ?z ?xs)" => "(If (Lt (Num 0) (Len ?xs)) (Let ?v (At ?xs (Sub (Len ?xs) (Num 1))) ?body) ?z)" if different("?acc","?v") if independent("?acc","?body") if not_identity("?v","?body")),
