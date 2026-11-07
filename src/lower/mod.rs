@@ -19,11 +19,20 @@ use oxc_span::SourceType;
 use std::collections::HashMap;
 use value::{Env, Val};
 
+/// A lowered expression.
+pub struct Lowered {
+    pub expr: RecExpr<Core>,
+    /// Lowering evaluated a construct it does not model, a call it could not resolve, or a
+    /// walker over an unknown callback. Any of them may throw, so the expression's value is
+    /// unknown even where its term does not mention them.
+    pub opaque: bool,
+}
+
 /// Lower one expression.
 ///
 /// # Errors
 /// A syntax error, or source that is not a single expression.
-pub fn lower(source: &str) -> Result<RecExpr<Core>, String> {
+pub fn lower(source: &str) -> Result<Lowered, String> {
     Ok(lower_all(&[source])?.remove(0))
 }
 
@@ -32,7 +41,7 @@ pub fn lower(source: &str) -> Result<RecExpr<Core>, String> {
 ///
 /// # Errors
 /// A syntax error, or a source that is not a single expression.
-pub fn lower_all(sources: &[&str]) -> Result<Vec<RecExpr<Core>>, String> {
+pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
     let arena = Allocator::default();
     let wrapped: Vec<String> = sources.iter().map(|s| format!("(\n{s}\n);")).collect();
     let programs = wrapped
@@ -54,7 +63,7 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<RecExpr<Core>>, String> {
             let mut lowerer = Lowerer::new(semantic.scoping(), &kinds);
             let value = lowerer.expr(expression(program));
             let root = lowerer.b.emit(&value);
-            lowerer.b.finish(root)
+            Lowered { expr: lowerer.b.finish(root), opaque: lowerer.opaque }
         })
         .collect())
 }
@@ -91,8 +100,10 @@ pub struct Lowerer<'a, 'l> {
     /// Each walker index binder, with the list it ranges over.
     coords: HashMap<Id, Id>,
     /// Each mapped list, with its callback and the list it maps.
-    maps: HashMap<Id, (Val<'a>, Id)>,
+    maps: HashMap<Id, (Val<'a>, value::Seq)>,
     depth: usize,
+    /// See [`Lowered::opaque`].
+    opaque: bool,
 }
 
 impl<'l> Lowerer<'_, 'l> {
@@ -107,6 +118,7 @@ impl<'l> Lowerer<'_, 'l> {
             coords: HashMap::new(),
             maps: HashMap::new(),
             depth: 0,
+            opaque: false,
         }
     }
 }

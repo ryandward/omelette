@@ -53,8 +53,8 @@ pub fn initialize() {
     static READY: OnceLock<()> = OnceLock::new();
     READY.get_or_init(|| {
         let _ = rules::rules();
-        let expr = crate::lower::lower("0").expect("a valid bootstrap expression");
-        let _ = runner(Limits::default()).with_expr(&expr).run(&[]);
+        let lowered = crate::lower::lower("0").expect("a valid bootstrap expression");
+        let _ = runner(Limits::default()).with_expr(&lowered.expr).run(&[]);
     });
 }
 
@@ -94,16 +94,17 @@ pub fn evaluate(source: &str) -> Result<Evaluation, String> {
 /// A syntax error, or source that is not a single expression.
 pub fn evaluate_with_limits(source: &str, limits: Limits) -> Result<Evaluation, String> {
     let start = Instant::now();
-    let expr = crate::lower::lower(source)?;
+    let lowered = crate::lower::lower(source)?;
     let parse_time = start.elapsed();
-    let run = runner(limits).with_expr(&expr).run(rules::rules());
+    let run = runner(limits).with_expr(&lowered.expr).run(rules::rules());
     if std::env::var_os("TRACE").is_some() {
         trace(&run);
     }
     let root = run.egraph.find(run.roots[0]);
     let saturated = matches!(run.stop_reason, Some(StopReason::Saturated));
     let consistent = run.egraph.classes().all(|c| !c.data.clash);
-    let found = detect::scan(&run.egraph, root);
+    let mut found = detect::scan(&run.egraph, root);
+    found.opaque |= lowered.opaque;
     let verdict = judge(saturated && consistent, &found);
     let families = if verdict == Verdict::Cheat { found.families.into_iter().collect() } else { Vec::new() };
     let canonical = Extractor::new(&run.egraph, Cost).find_best(root).1;
@@ -167,8 +168,8 @@ pub struct JointEvaluation {
 /// A syntax error, or a source that is not a single expression.
 pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
     let mut runner = runner(Limits::default());
-    for expr in crate::lower::lower_all(sources)? {
-        runner = runner.with_expr(&expr);
+    for lowered in crate::lower::lower_all(sources)? {
+        runner = runner.with_expr(&lowered.expr);
     }
     let run = runner.run(rules::rules());
     let roots: Vec<_> = run.roots.iter().map(|&id| run.egraph.find(id)).collect();

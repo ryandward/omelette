@@ -10,7 +10,7 @@ pub struct Findings {
     pub families: BTreeSet<Family>,
     /// A witness whose replacement or family leaves the answer to unknown inputs.
     pub possible: bool,
-    /// Unsupported syntax or an unresolved call reaches the result.
+    /// Unsupported syntax or an unresolved call reaches the result, or lowering evaluated one.
     pub opaque: bool,
 }
 
@@ -155,7 +155,7 @@ fn certain(g: &Graph, z: Id) -> bool {
         return *c != Const::Undef;
     }
     class.nodes.iter().any(|n| match n {
-        Core::Var(v) => !matches!(v.kind, Kind::Any | Kind::Acc),
+        Core::Var(v) => !matches!(v.kind, Kind::Any | Kind::Acc | Kind::Item),
         n => matches!(
             n,
             Core::NaN | Core::True | Core::False | Core::Nil | Core::Int(_) | Core::Str(_)

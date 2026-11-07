@@ -2,7 +2,7 @@
 use super::Lowerer;
 use super::expr::Arm;
 use super::ops::Bin;
-use super::value::{Body, Fun, Short, Ty, Val};
+use super::value::{Body, Fun, Items, Seq, Short, Ty, Val};
 use crate::affine::Form;
 use crate::core::{Core, Family, Kind};
 use egg::Id;
@@ -23,13 +23,26 @@ impl<'a> Lowerer<'a, '_> {
                 return self.unsupported();
             }
             let receiver = self.expr(&m.object);
-            return self.method(receiver, m.property.name.as_str(), &args);
+            let name = m.property.name.as_str();
+            let values = std::iter::once(receiver).chain(args).collect();
+            return self.strict(values, &mut |l, mut values| {
+                let receiver = values.remove(0);
+                l.method(receiver, name, &values)
+            });
         }
         let callee = self.expr(&c.callee);
         self.apply(callee, args)
     }
-    /// Call a value: inline a known function, or leave an opaque call.
+    /// Call a value once it and its arguments are evaluated: inline a known function, or
+    /// leave an opaque call.
     pub fn apply(&mut self, callee: Val<'a>, args: Vec<Val<'a>>) -> Val<'a> {
+        if callee.may_throw() || args.iter().any(Val::may_throw) {
+            let values = std::iter::once(callee).chain(args).collect();
+            return self.strict(values, &mut |l, mut values| {
+                let callee = values.remove(0);
+                l.apply(callee, values)
+            });
+        }
         match callee {
             Val::Fun(f) if self.depth < INLINE_DEPTH => self.inline(&f, args),
             Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| match f {
@@ -37,6 +50,7 @@ impl<'a> Lowerer<'a, '_> {
                 f => l.apply(f, args.clone()),
             }),
             callee => {
+                self.opaque = true;
                 let mut children = vec![self.b.emit(&callee)];
                 children.extend(args.iter().map(|a| self.b.emit(a)));
                 Val::Term(self.b.add(Core::Call(children.into())), Ty::Any)
@@ -102,14 +116,7 @@ impl<'a> Lowerer<'a, '_> {
         match first {
             Statement::ReturnStatement(r) => r.argument.as_ref().map_or(Val::Undef, |e| self.expr(e)),
             Statement::VariableDeclaration(d) if d.kind == VariableDeclarationKind::Const => {
-                for declarator in &d.declarations {
-                    let Some(init) = &declarator.init else { return self.unsupported() };
-                    let value = self.expr(init);
-                    if !self.bind(&declarator.id, value) {
-                        return self.unsupported();
-                    }
-                }
-                self.run(rest)
+                self.declare(&d.declarations, rest)
             }
             Statement::IfStatement(s) => {
                 let test = self.expr(&s.test);
@@ -128,15 +135,25 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// Bind each `const` declarator once its initializer is evaluated, then run the rest.
+    fn declare(&mut self, declarators: &'a [oxc_ast::ast::VariableDeclarator<'a>], rest: &[&'a Statement<'a>]) -> Val<'a> {
+        let Some((first, others)) = declarators.split_first() else { return self.run(rest) };
+        let Some(init) = &first.init else { return self.unsupported() };
+        let value = self.expr(init);
+        self.strict(vec![value], &mut |l, mut value| {
+            if l.bind(&first.id, value.remove(0)) { l.declare(others, rest) } else { l.unsupported() }
+        })
+    }
     fn method(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         match receiver {
             Val::List(items) => self.literal_method(&items, name, args),
             Val::Short(s) => self.short_method(&s, name, args),
-            Val::Term(id, Ty::List) => self.term_method(id, name, args),
+            Val::Term(id, Ty::List(items)) => self.term_method(Seq { id, items }, name, args),
             Val::Split(_) => self.lift(receiver, Family::Propagate, &mut |l, r| match r {
                 Val::Undef => Val::Throw,
                 r => l.method(r, name, args),
             }),
+            Val::Undef | Val::Throw => Val::Throw,
             _ => self.unsupported(),
         }
     }
@@ -144,10 +161,13 @@ impl<'a> Lowerer<'a, '_> {
     fn literal_method(&mut self, items: &Rc<Vec<Val<'a>>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
-            "map" => Val::List(Rc::new(self.each(items, &f))),
+            "map" => {
+                let mapped = self.each(items, &f);
+                self.strict(mapped, &mut |_, mapped| Val::List(Rc::new(mapped)))
+            }
             "filter" => self.filter_items(items, &f).unwrap_or_else(|| {
-                let id = self.b.emit(&Val::List(items.clone()));
-                self.term_method(id, name, args)
+                let list = self.seq(items);
+                self.term_method(list, name, args)
             }),
             "find" => self.find_items(items, &f),
             "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
@@ -160,10 +180,10 @@ impl<'a> Lowerer<'a, '_> {
                 let mapped = self.each(items, &f);
                 self.flat_items(&Rc::new(mapped))
             }
-            "concat" => self.concat_list(Val::List(items.clone()), f),
+            "concat" => self.concat_list(Val::List(items.clone()), args),
             _ => {
-                let id = self.b.emit(&Val::List(items.clone()));
-                self.term_method(id, name, args)
+                let list = self.seq(items);
+                self.term_method(list, name, args)
             }
         }
     }
@@ -228,9 +248,9 @@ impl<'a> Lowerer<'a, '_> {
     /// flat spreads a list element one level and keeps any other element.
     fn spread(&mut self, v: Val<'a>) -> Val<'a> {
         self.lift(v, Family::Container, &mut |l, v| match v {
-            Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List) | Val::Throw => v,
+            Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v])),
-            v => l.dynamic("spread", &[&v], Ty::List),
+            v => l.dynamic("spread", &[&v], Ty::List(Items::Any)),
         })
     }
     fn flat_items(&mut self, items: &Rc<Vec<Val<'a>>>) -> Val<'a> {
@@ -273,7 +293,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     }
     /// The slot's value under `present`, or `unit` where it is absent or filtered out.
     fn over_slot(&mut self, s: &Short<'a>, family: Family, unit: &Val<'a>, present: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
-        let slot = self.split_read(s.read, false);
+        let slot = self.split_read(s.read, s.drift, s.items);
         let (elem, keep) = (s.elem.clone(), s.keep.clone());
         self.worlds(slot, family, &mut |l, v| {
             if matches!(v, Val::Undef) {
@@ -312,61 +332,68 @@ pub enum Walker {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    fn term_method(&mut self, list: Id, name: &str, args: &[Val<'a>]) -> Val<'a> {
+    fn term_method(&mut self, list: Seq, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
-            "map" => Val::Term(self.walker(Walker::Map, &f, list), Ty::List),
-            "every" => Val::Term(self.walker(Walker::Every, &f, list), Ty::Bool),
-            "some" => Val::Term(self.walker(Walker::Some, &f, list), Ty::Bool),
+            "map" => self.walker(Walker::Map, &f, list).val(),
+            "every" => Val::Term(self.walker(Walker::Every, &f, list).id, Ty::Bool),
+            "some" => Val::Term(self.walker(Walker::Some, &f, list).id, Ty::Bool),
             "filter" => self.filter(list, &f),
             "find" => self.find(list, &f),
             "reduce" => self.reduce(list, &f, args.get(1).cloned()),
             "join" => {
                 let sep = self.separator(args.first().cloned());
                 let sep = self.b.emit(&sep);
-                Val::Term(self.b.add(Core::Join([sep, list])), Ty::Str)
+                Val::Term(self.b.add(Core::Join([sep, list.id])), Ty::Str)
             }
-            "flat" => Val::Term(self.b.add(Core::Flat(list)), Ty::List),
+            // A nested element's own elements are not covered by the precondition.
+            "flat" => Seq { id: self.b.add(Core::Flat(list.id)), items: Items::Any }.val(),
             "flatMap" => {
                 let mapped = self.walker(Walker::Map, &f, list);
-                Val::Term(self.b.add(Core::Flat(mapped)), Ty::List)
+                Seq { id: self.b.add(Core::Flat(mapped.id)), items: Items::Any }.val()
             }
             "slice" => self.slice(list, args.first().cloned(), args.get(1).cloned()),
             "at" => self.at(list, f),
-            "concat" => self.concat_list(Val::Term(list, Ty::List), f),
+            "concat" => self.concat_list(list.val(), args),
             _ => self.unsupported(),
         }
     }
     /// A walker node over `list` whose callback is lowered with fresh element and index
-    /// binders. An unknown callback stays opaque.
-    pub fn walker(&mut self, kind: Walker, f: &Val<'a>, list: Id) -> Id {
-        let lam = match f {
+    /// binders. An unknown callback stays opaque. The result's elements are the callback's
+    /// values for a map, and the list's own otherwise.
+    pub fn walker(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> Seq {
+        let (lam, items) = match f {
             Val::Fun(_) => self.callback(kind, f, list),
-            other => self.b.emit(other),
+            other => {
+                self.opaque = true;
+                (self.b.emit(other), Items::Any)
+            }
         };
         let node = self.b.add(match kind {
-            Walker::Map => Core::Map([lam, list]),
-            Walker::Filter => Core::Filter([lam, list]),
-            Walker::Every => Core::Every([lam, list]),
-            Walker::Some => Core::Some([lam, list]),
+            Walker::Map => Core::Map([lam, list.id]),
+            Walker::Filter => Core::Filter([lam, list.id]),
+            Walker::Every => Core::Every([lam, list.id]),
+            Walker::Some => Core::Some([lam, list.id]),
         });
         if kind == Walker::Map && matches!(f, Val::Fun(_)) {
             self.maps.insert(node, (f.clone(), list));
         }
-        node
+        Seq { id: node, items: if kind == Walker::Map { items } else { list.items } }
     }
-    fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Id) -> Id {
-        let (x, i) = (self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));
-        self.coords.insert(i, list);
-        let args = vec![Val::Term(x, Ty::Defined), Val::Num(Form::atom(i)), Val::Term(list, Ty::List)];
+    /// The callback's lambda, and whether every value it returns is defined.
+    fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> (Id, Items) {
+        let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        self.coords.insert(i, list.id);
+        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
         let result = self.apply(f.clone(), args);
+        let items = Items::of(result.defined());
         let body = if kind == Walker::Map {
             self.escape(&result)
         } else {
             let truth = self.truthy_split(result);
             self.b.emit(&truth)
         };
-        self.b.add(Core::Lam(vec![x, i, body].into()))
+        (self.b.add(Core::Lam(vec![x, i, body].into())), items)
     }
     /// A possibly missing read at another collection's coordinate, left as a hole in a
     /// collection shaped like the walked one.
@@ -380,15 +407,15 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    fn filter(&mut self, list: Id, f: &Val<'a>) -> Val<'a> {
+    fn filter(&mut self, list: Seq, f: &Val<'a>) -> Val<'a> {
         if let Some((index, lam)) = self.projection(f, list) {
-            let walked = self.b.add(Core::Filter([lam, list]));
+            let walked = Seq { id: self.b.add(Core::Filter([lam, list.id])), items: list.items };
             let read = self.element(list, &index);
             return projected(walked, &read);
         }
-        Val::Term(self.walker(Walker::Filter, f, list), Ty::List)
+        self.walker(Walker::Filter, f, list).val()
     }
-    fn find(&mut self, list: Id, f: &Val<'a>) -> Val<'a> {
+    fn find(&mut self, list: Seq, f: &Val<'a>) -> Val<'a> {
         if let Some((index, _)) = self.projection(f, list) {
             return self.element(list, &index);
         }
@@ -398,7 +425,7 @@ impl<'a> Lowerer<'a, '_> {
     /// The index `j` when the callback is `(_, idx) => idx === j` (either side) with `j` an
     /// integer that mentions neither parameter: the filter keeps at most `list[j]`. Also the
     /// predicate's term, lowered once.
-    fn projection(&mut self, f: &Val<'a>, list: Id) -> Option<(Form, Id)> {
+    fn projection(&mut self, f: &Val<'a>, list: Seq) -> Option<(Form, Id)> {
         let Val::Fun(fun) = f else { return None };
         let (Body::Expr(body), Some(index)) = (fun.body, fun.params.items.get(1)) else { return None };
         let BindingPattern::BindingIdentifier(idx) = &index.pattern else { return None };
@@ -413,18 +440,19 @@ impl<'a> Lowerer<'a, '_> {
         let other = if is_idx(&eq.left) { &eq.right } else if is_idx(&eq.right) { &eq.left } else { return None };
         self.projected_index(fun, list, other)
     }
-    fn projected_index(&mut self, fun: &Fun<'a>, list: Id, target: &'a Expression<'a>) -> Option<(Form, Id)> {
-        let (x, i) = (self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));
-        let saved = std::mem::replace(&mut self.env, fun.env.clone());
-        let args = vec![Val::Term(x, Ty::Defined), Val::Num(Form::atom(i)), Val::Term(list, Ty::List)];
+    fn projected_index(&mut self, fun: &Fun<'a>, list: Seq, target: &'a Expression<'a>) -> Option<(Form, Id)> {
+        let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        let (saved, opaque) = (std::mem::replace(&mut self.env, fun.env.clone()), self.opaque);
+        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
         let bound = self.bind_params(fun, args);
         let value = bound.then(|| self.expr(target));
-        self.env = saved;
+        // Recognizing a projection evaluates nothing; the walker that replaces it does.
+        (self.env, self.opaque) = (saved, opaque);
         let Some(Val::Num(form)) = value else { return None };
         if form.terms.keys().any(|&a| self.b.mentions(a, x) || self.b.mentions(a, i)) {
             return None;
         }
-        self.coords.insert(i, list);
+        self.coords.insert(i, list.id);
         let test = self.strict_eq(&Val::Num(Form::atom(i)), &Val::Num(form.clone()));
         let body = self.b.emit(&test);
         Some((form, self.b.add(Core::Lam(vec![x, i, body].into()))))
@@ -434,8 +462,8 @@ impl<'a> Lowerer<'a, '_> {
 impl<'a> Lowerer<'a, '_> {
     /// `list.reduce(f, init)`. A callback that ignores its accumulator yields its value on the
     /// last element, or the initial value for an empty list.
-    fn reduce(&mut self, list: Id, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
-        let len = Form::atom(self.b.add(Core::Len(list)));
+    fn reduce(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+        let len = Form::atom(self.b.add(Core::Len(list.id)));
         let final_index = len.plus(&Form::constant(1), -1).unwrap_or_default();
         let slot = self.element(list, &final_index);
         let acc = self.b.fresh(Kind::Acc);
@@ -447,7 +475,7 @@ impl<'a> Lowerer<'a, '_> {
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
             x => {
-                let out = l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x.clone(), Val::Num(final_index.clone()), Val::Term(list, Ty::List)]);
+                let out = l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x.clone(), Val::Num(final_index.clone()), list.val()]);
                 returns_element &= out.identical(&x);
                 out
             }
@@ -458,10 +486,10 @@ impl<'a> Lowerer<'a, '_> {
         }
         body
     }
-    fn fold(&mut self, list: Id, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
-        let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));
-        self.coords.insert(i, list);
-        let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, Ty::Defined), Val::Num(Form::atom(i)), Val::Term(list, Ty::List)];
+    fn fold(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+        let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        self.coords.insert(i, list.id);
+        let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
         let body = self.apply(f.clone(), args);
         let body = self.b.emit(&body);
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
@@ -469,12 +497,13 @@ impl<'a> Lowerer<'a, '_> {
             Some(z) => self.b.emit(&z),
             None => self.b.add(Core::Throw),
         };
-        Val::Term(self.b.add(Core::Fold([lam, init, list])), Ty::Any)
+        Val::Term(self.b.add(Core::Fold([lam, init, list.id])), Ty::Any)
     }
-    /// `list.slice(start, end)`: a list of at most one element when the bounds differ by
-    /// one, since slicing never widens past `end - start`.
-    fn slice(&mut self, list: Id, start: Option<Val<'a>>, end: Option<Val<'a>>) -> Val<'a> {
-        let len = Form::atom(self.b.add(Core::Len(list)));
+    /// `list.slice(start, end)`, whose bounds count from the end when negative. Bounds that
+    /// differ by `d >= 0` keep at most `d` elements whatever their signs, so a difference of
+    /// one is a list of at most one element; a negative difference can keep any number.
+    fn slice(&mut self, list: Seq, start: Option<Val<'a>>, end: Option<Val<'a>>) -> Val<'a> {
+        let len = Form::atom(self.b.add(Core::Len(list.id)));
         let start = match start {
             None | Some(Val::Undef) => Form::constant(0),
             Some(Val::Num(f)) => f,
@@ -488,19 +517,20 @@ impl<'a> Lowerer<'a, '_> {
         };
         // slice(-k) keeps at most the last k elements.
         let tail = start.known().filter(|&k| open && k < 0).map(|k| -k);
+        let drift = start.terms.keys().chain(end.terms.keys()).any(|a| self.coords.contains_key(a));
         let (a, z) = (self.b.form(&start), self.b.form(&end));
-        let sliced = self.b.add(Core::Slice([list, a, z]));
+        let sliced = Seq { id: self.b.add(Core::Slice([list.id, a, z])), items: list.items };
         match tail.or_else(|| end.plus(&start, -1).and_then(|w| w.known())) {
-            Some(w) if w <= 0 => Val::empty(),
-            Some(1) => self.short(sliced),
-            _ => Val::Term(sliced, Ty::List),
+            Some(0) => Val::empty(),
+            Some(1) => self.short(sliced, drift),
+            _ => sliced.val(),
         }
     }
-    fn at(&mut self, list: Id, index: Val<'a>) -> Val<'a> {
+    fn at(&mut self, list: Seq, index: Val<'a>) -> Val<'a> {
         let Val::Num(k) = index else { return self.unsupported() };
         match k.known() {
             Some(n) if n < 0 => {
-                let len = Form::atom(self.b.add(Core::Len(list)));
+                let len = Form::atom(self.b.add(Core::Len(list.id)));
                 let from_end = len.plus(&k, 1).unwrap_or_default();
                 self.element(list, &from_end)
             }
@@ -511,21 +541,34 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    /// `list.concat(item)`: a list argument is spread, any other value appended.
-    fn concat_list(&mut self, list: Val<'a>, item: Val<'a>) -> Val<'a> {
-        let item = match item {
-            Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List) => item,
-            v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v])),
-            _ => return self.unsupported(),
-        };
-        self.append(list, item)
+    /// `list.concat(...items)`: each list argument is spread, and any other value appended.
+    fn concat_list(&mut self, list: Val<'a>, items: &[Val<'a>]) -> Val<'a> {
+        let mut out = self.append(list, Val::empty());
+        for item in items {
+            let item = match item {
+                Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => item.clone(),
+                v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v.clone()])),
+                _ => return self.unsupported(),
+            };
+            out = self.append(out, item);
+        }
+        out
     }
 }
 
-/// A filtered list holding at most the element read by `slot`.
-fn projected<'a>(list: Id, slot: &Val<'a>) -> Val<'a> {
-    let Val::Split(s) = slot else { return Val::Term(list, Ty::List) };
-    let short = Short { list, read: s.read, var: s.elem, elem: Val::Term(s.elem, Ty::Defined), keep: Val::Bool(true) };
+/// A filtered list holding at most the element read by `slot`, with that element's value
+/// where present (a mapped list's mapped value), and the slot's drift.
+fn projected<'a>(list: Seq, slot: &Val<'a>) -> Val<'a> {
+    let Val::Split(s) = slot else { return list.val() };
+    let short = Short {
+        list,
+        read: s.read,
+        var: s.elem,
+        items: s.items,
+        elem: s.present.clone(),
+        keep: Val::Bool(true),
+        drift: s.drift,
+    };
     Val::Short(Rc::new(short))
 }
 
@@ -538,6 +581,7 @@ impl<'a> Lowerer<'a, '_> {
             match self.truthy_split(decision) {
                 Val::Bool(true) => kept.push(item.clone()),
                 Val::Bool(false) => {}
+                Val::Throw => return Some(Val::Throw),
                 _ => return None,
             }
         }

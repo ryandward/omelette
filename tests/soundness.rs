@@ -92,7 +92,8 @@ fn reduce_without_an_initial_value_returns_a_lone_element_uncalled() {
     value("[3, 4].reduce((_, x) => 7)", "7");
     let r = checked("xs.reduce((_, x) => 7)", Verdict::NoCheat);
     assert!(r.canonical.to_string().starts_with("(fold "), "{}", r.canonical);
-    value("xs.reduce((_, x) => x)", "(read list:xs (lin -1 1 (len list:xs)))");
+    // An empty list throws.
+    value("xs.reduce((_, x) => x)", "(maybe propagate throw (lam elem:@1 elem:@1) (read list:xs (lin -1 1 (len list:xs))))");
 }
 
 #[test]
@@ -122,4 +123,67 @@ fn an_unknown_in_the_present_branch_leaves_the_witness_undecided() {
 fn a_present_element_that_is_undefined_is_not_missing() {
     // The read is in range; its element's value is `undefined`, which egg also proves.
     value("[undefined, ...ys].map((x) => 5)[0]", "5");
+}
+
+#[test]
+fn a_list_built_with_undefined_elements_does_not_claim_they_are_defined() {
+    // The element is `undefined`, so `x !== undefined` may be false.
+    let r = checked("[undefined, ...ys].every((x) => x !== undefined)", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "true");
+    let r = checked("xs.map(() => undefined).every((x) => x !== undefined)", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "true");
+}
+
+#[test]
+fn a_projection_of_a_mapped_list_holds_the_mapped_value() {
+    cheat("users.map((u, k) => roles[k] ?? 'none').filter((_, k) => k === i)[0]", &[Family::Default]);
+    value("users.map((u) => 'on').filter((_, k) => k === i).every((n) => n === 'on')", "true");
+}
+
+#[test]
+fn a_slice_whose_bounds_differ_by_a_negative_amount_can_hold_anything() {
+    value("[1, 2, 3].slice(1, -1).length", "1");
+    cheat("xs.slice(1, -1)[0] ?? 0", &[Family::Default]);
+    let r = checked("xs.slice(0, -1)", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "nil");
+}
+
+#[test]
+fn length_is_undefined_on_numbers_and_unknown_on_unknown_values() {
+    value("(5).length === undefined", "true");
+    value("true.length === undefined", "true");
+    let r = checked("((a) => a.length === undefined)(y)", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "false");
+}
+
+#[test]
+fn spreading_iterates_code_points_and_an_unknown_value_is_opaque() {
+    value("[...'\u{1F600}'].length", "1");
+    checked("((a) => [...a])(y)", Verdict::Undecided);
+    cheat("groups.map((g) => [...g, names[i] ?? 'x'])", &[Family::Default]);
+    cheat("users.reduce((acc, u, i) => [...acc, roles[i] ?? 'none'], [])", &[Family::Default]);
+}
+
+#[test]
+fn concat_spreads_every_argument() {
+    value("[1].concat(2, 3).length", "3");
+    value("[1].concat().length", "1");
+}
+
+#[test]
+fn a_throw_is_an_effect_not_a_value() {
+    // Each throws where the read is missing: no value is swallowed.
+    for source in ["xs[i].length + 1", "xs[i].length < 3", "(() => { const n = xs[i].length; return xs[i] ?? 0; })()"] {
+        checked(source, Verdict::NoCheat);
+    }
+    value("[undefined.length, 1][1]", "throw");
+    value("((y) => 5)(undefined.length)", "throw");
+    value("[1, 2].map((x) => undefined.length)", "throw");
+}
+
+#[test]
+fn evaluating_what_is_not_modeled_leaves_the_value_unknown() {
+    for source in ["[null.x, 1][1]", "[(() => { throw 1 })(), 1][1]", "[f(1), 2][1]"] {
+        checked(source, Verdict::Undecided);
+    }
 }

@@ -87,7 +87,7 @@ impl Builder {
             Val::Num(f) => self.form(f),
             Val::Str(s) => self.add(Core::Str(*s)),
             Val::List(items) => self.list(items),
-            Val::Short(short) => short.list,
+            Val::Short(short) => short.list.id,
             Val::Fun(_) => self.unsupported(),
             Val::Term(id, _) => *id,
             Val::Split(s) => self.split(s),
@@ -101,8 +101,10 @@ impl Builder {
         })
     }
     fn split(&mut self, s: &Split<'_>) -> Id {
+        // Nothing happened to the read: it is still undefined where missing and the element
+        // where present.
         let passes = matches!(s.present, Val::Term(id, _) if id == s.elem);
-        if s.family == Family::Propagate && passes {
+        if matches!(s.absent, Val::Undef) && passes {
             return s.read;
         }
         let absent = self.emit(&s.absent);

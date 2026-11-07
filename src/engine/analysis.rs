@@ -197,13 +197,11 @@ fn bounds(g: &Graph, n: &Core) -> (Option<i64>, Option<i64>) {
     }
 }
 
-/// The most elements a slice can hold: slicing never widens past `end - start`.
+/// The most elements a slice can hold. Bounds that differ by `d >= 0` keep at most `d`
+/// elements whatever their signs; a negative difference, as in `slice(1, -1)`, bounds nothing.
 fn width(g: &Graph, list: Id) -> Option<i64> {
     g[list].nodes.iter().find_map(|n| match n {
-        Core::Slice([_, a, b]) => {
-            let w = class_form(g, *b).plus(&class_form(g, *a), -1)?.known()?;
-            Some(w.max(0))
-        }
+        Core::Slice([_, a, b]) => class_form(g, *b).plus(&class_form(g, *a), -1)?.known().filter(|&w| w >= 0),
         _ => None,
     })
 }

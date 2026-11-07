@@ -197,6 +197,8 @@ pub enum Kind {
     Any,
     /// A walker's element, which the model's dense lists make defined.
     Elem,
+    /// An element of a list that may hold undefined, such as `[undefined, ...ys]`.
+    Item,
     /// A walker's index, an integer in range of its receiver.
     Index,
     /// A fold's accumulator.
@@ -204,12 +206,13 @@ pub enum Kind {
 }
 
 impl Kind {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Int,
         Self::List,
         Self::Fun,
         Self::Any,
         Self::Elem,
+        Self::Item,
         Self::Index,
         Self::Acc,
     ];
@@ -220,6 +223,7 @@ impl Kind {
             Self::Fun => "fn",
             Self::Any => "any",
             Self::Elem => "elem",
+            Self::Item => "item",
             Self::Index => "index",
             Self::Acc => "acc",
         }

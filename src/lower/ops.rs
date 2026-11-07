@@ -20,6 +20,8 @@ pub enum Bin {
 /// An operation applied on each side of a split.
 pub type Op<'a, 'l, 'f> = dyn FnMut(&mut Lowerer<'a, 'l>, Val<'a>, Val<'a>) -> Val<'a> + 'f;
 pub type Op1<'a, 'l, 'f> = dyn FnMut(&mut Lowerer<'a, 'l>, Val<'a>) -> Val<'a> + 'f;
+/// What follows the evaluation of some values.
+pub type Then<'a, 'l, 'f> = dyn FnMut(&mut Lowerer<'a, 'l>, Vec<Val<'a>>) -> Val<'a> + 'f;
 
 impl<'a, 'l> Lowerer<'a, 'l> {
     /// Rebuild a split from new sides, composing `family` into the split's flow if this
@@ -66,6 +68,28 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     pub fn lift(&mut self, v: Val<'a>, family: Family, op: &mut Op1<'a, 'l, '_>) -> Val<'a> {
         self.lift2(v, Val::Undef, family, &mut |l, v, _| op(l, v))
     }
+    /// Continue with `vals` once they are evaluated: a world in which one of them throws
+    /// throws, and `then` runs in every other world with the values narrowed to it.
+    pub fn strict(&mut self, vals: Vec<Val<'a>>, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
+        if vals.iter().any(|v| matches!(v, Val::Throw)) {
+            return Val::Throw;
+        }
+        let throwing = vals.iter().find_map(|v| match v {
+            Val::Split(s) if v.may_throw() => Some(s.clone()),
+            _ => None,
+        });
+        let Some(s) = throwing else { return then(self, vals) };
+        let mut side = |l: &mut Self, present: bool| {
+            let world = if present { Val::Term(s.elem, s.items.ty()) } else { Val::Undef };
+            l.within(s.read, world, |l| {
+                let narrowed = vals.iter().map(|v| l.assume(v.clone(), s.read, present)).collect();
+                l.strict(narrowed, then)
+            })
+        };
+        let absent = side(self, false);
+        let present = side(self, true);
+        self.resplit(&s, absent, present, Family::Propagate)
+    }
 }
 
 /// JavaScript strict equality of two known values.
@@ -90,6 +114,7 @@ impl<'a> Lowerer<'a, '_> {
         let undecided = op == Bin::Eq && (unknown(&a) || unknown(&b));
         let family = if undecided { Family::Undecided } else { Family::Sink };
         self.lift2(a, b, family, &mut |l, a, b| match op {
+            _ if matches!(a, Val::Throw) || matches!(b, Val::Throw) => Val::Throw,
             Bin::Add => l.add(a, b),
             Bin::Sub | Bin::Mul => l.arith(op, &a, &b),
             Bin::Lt | Bin::Le => l.order(op == Bin::Lt, &a, &b),
@@ -188,7 +213,7 @@ impl<'a> Lowerer<'a, '_> {
                 None => self.nonzero(&f),
             },
             Val::Str(s) => Val::Bool(!s.units().is_empty()),
-            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List) => Val::Bool(true),
+            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List(_)) => Val::Bool(true),
             Val::Term(_, Ty::Str) => {
                 let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
@@ -285,7 +310,7 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
         Val::Str(_) | Val::Term(_, Ty::Str) => Some(1),
         Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(2),
         Val::Undef => Some(3),
-        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List) => Some(4),
+        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => Some(4),
         Val::Term(_, Ty::Defined) => Some(5),
         _ => None,
     };

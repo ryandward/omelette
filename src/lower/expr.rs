@@ -1,7 +1,7 @@
 //! Expressions: symbols, operators, branches, and literals.
 use super::Lowerer;
 use super::ops::Bin;
-use super::value::{Body, Fun, Ty, Val};
+use super::value::{Body, Fun, Items, Ty, Val};
 use crate::affine::Form;
 use crate::core::{Core, Family, Kind, Utf16};
 use egg::Id;
@@ -59,6 +59,7 @@ impl<'a> Lowerer<'a, '_> {
         }
     }
     pub fn unsupported(&mut self) -> Val<'a> {
+        self.opaque = true;
         Val::Term(self.b.unsupported(), Ty::Any)
     }
     fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
@@ -81,7 +82,7 @@ impl<'a> Lowerer<'a, '_> {
         let var = self.b.var(kind, name);
         match kind {
             Kind::Int => Val::Num(Form::atom(var)),
-            Kind::List => Val::Term(var, Ty::List),
+            Kind::List => Val::Term(var, Ty::List(Items::Defined)),
             Kind::Fun => Val::Term(var, Ty::Defined),
             _ => Val::Term(var, Ty::Any),
         }
@@ -128,20 +129,25 @@ impl<'a> Lowerer<'a, '_> {
         }
         out
     }
+    /// An array literal: every element is evaluated, so one that throws makes it throw.
     fn array(&mut self, a: &'a ArrayExpression<'a>) -> Val<'a> {
-        let mut out = Val::empty();
+        let mut values = Vec::with_capacity(a.elements.len());
+        let mut spread = Vec::with_capacity(a.elements.len());
         for element in &a.elements {
-            let segment = match element {
-                ArrayExpressionElement::SpreadElement(s) => self.expr(&s.argument),
+            let (v, s) = match element {
+                ArrayExpressionElement::SpreadElement(s) => (self.expr(&s.argument), true),
                 ArrayExpressionElement::Elision(_) => return self.unsupported(),
-                e => {
-                    let v = self.expr(e.to_expression());
-                    Val::List(Rc::new(vec![v]))
-                }
+                e => (self.expr(e.to_expression()), false),
             };
-            out = self.append(out, segment);
+            values.push(v);
+            spread.push(s);
         }
-        out
+        self.strict(values, &mut |l, values| {
+            values.into_iter().zip(&spread).fold(Val::empty(), |out, (v, &s)| {
+                let segment = if s { v } else { Val::List(Rc::new(vec![v])) };
+                l.append(out, segment)
+            })
+        })
     }
 }
 
@@ -157,7 +163,10 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// `left ?? right`: right where left is undefined.
     pub fn coalesce(&mut self, left: Val<'a>, right: Arm<'a, '_>) -> Val<'a> {
+        // The probe only types the fallback; lowering it evaluates nothing.
+        let opaque = self.opaque;
         let probe = self.arm(right);
+        self.opaque = opaque;
         let family = if matches!(probe, Val::Term(_, Ty::Any)) { Family::Undecided } else { Family::Default };
         self.worlds(left, family, &mut |l, v| match v {
             Val::Undef => l.arm(right),
@@ -215,7 +224,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         let present = self.within(s.read, element, |l| l.worlds(s.present.clone(), family, then));
         self.resplit(&s, absent, present, family)
     }
-    fn within(&mut self, read: Id, value: Val<'a>, f: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {
+    pub fn within(&mut self, read: Id, value: Val<'a>, f: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {
         let old = self.narrow.insert(read, value);
         let out = f(self);
         match old {
@@ -248,12 +257,13 @@ fn join(a: &Val<'_>, b: &Val<'_>) -> Option<Ty> {
         Val::Num(_) => None,
         Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(Ty::Bool),
         Val::Str(_) | Val::Term(_, Ty::Str) => Some(Ty::Str),
-        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List) => Some(Ty::List),
+        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => v.items().map(Ty::List),
         Val::Undef | Val::Term(_, Ty::Any) | Val::Split(_) => Some(Ty::Any),
         _ => Some(Ty::Defined),
     };
     match (ty(a), ty(b)) {
         (x, y) if x == y => x,
+        (Some(Ty::List(x)), Some(Ty::List(y))) => Some(Ty::List(x.both(y))),
         (Some(Ty::Any), _) | (_, Some(Ty::Any)) => Some(Ty::Any),
         _ => Some(Ty::Defined),
     }
