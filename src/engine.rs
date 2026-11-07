@@ -1,6 +1,6 @@
 use crate::affine::Form;
 use egg::{rewrite as rw, *};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 pub type Graph = EGraph<SymbolLang, Facts>;
@@ -638,7 +638,10 @@ impl Applier<SymbolLang, Facts> for SeedIndex {
         vec![g.add(n)]
     }
 }
-// The relational M1 join is a hash-cons lookup of the partial read's conditional.
+// M1: a branch on whether xs[k] exists, answering f(xs[k]) when it does and a written z
+// when it does not, is maybe z f (xs !? k). It is built as Maybe z (IndexQ (Map f xs) k),
+// fromMaybe over the mapped read; f = id is plain fromMaybe z (xs !? k). The partial read
+// is found by its expansion If c (At xs k) Undef among the parents of the branch condition.
 // Report only a changed union, so a successful match does not prevent saturation.
 #[derive(Clone)]
 struct MaybeFromRead;
@@ -651,17 +654,191 @@ impl Applier<SymbolLang, Facts> for MaybeFromRead {
         _: Option<&PatternAst<SymbolLang>>,
         _: Symbol,
     ) -> Vec<Id> {
-        let Some(at) = g.lookup(SymbolLang::new("At", vec![s[v("?xs")], s[v("?k")]])) else {
+        let id = g.find(id);
+        let (c, t, z) = (g.find(s[v("?c")]), g.find(s[v("?t")]), g.find(s[v("?z")]));
+        // A branch that is its own present value (If c X z = X) says nothing about the read.
+        // One witness per class is enough; rebuilding more would only grow the graph.
+        if t == id
+            || g[c].data.boolean.is_some()
+            || ["Undef", "Oob", "Throw"].iter().any(|o| has(g, z, o))
+            || g[id].nodes.iter().any(|n| {
+                op(n) == "Maybe" && g.find(n.children[0]) == z && has(g, n.children[1], "IndexQ")
+            })
+        {
             return vec![];
-        };
+        }
         let Some(undef) = g.lookup(SymbolLang::leaf("Undef")) else {
             return vec![];
         };
-        let Some(m) = g.lookup(SymbolLang::new("If", vec![s[v("?c")], at, undef])) else {
-            return vec![];
+        let mut reads = vec![];
+        for parent in g[c].parents().map(|p| g.find(p)).collect::<BTreeSet<_>>() {
+            for n in &g[parent].nodes {
+                let k = &n.children;
+                if op(n) == "If"
+                    && g.find(k[0]) == c
+                    && g.find(k[2]) == undef
+                    && let Some(at) = g[k[1]].nodes.iter().find(|n| op(n) == "At")
+                {
+                    reads.push((parent, g.find(k[1]), at.children[0], at.children[1]));
+                }
+            }
+        }
+        let mut changed = false;
+        for (m, at, xs, k) in reads {
+            let maybe = if t == at {
+                SymbolLang::new("Maybe", vec![z, m])
+            } else {
+                let Some(f) = element_function(g, t, &[at, m], c, z) else {
+                    continue;
+                };
+                let map = g.add(SymbolLang::new("Map", vec![f, xs]));
+                let read = g.add(SymbolLang::new("IndexQ", vec![map, k]));
+                // The mapped read is f(xs[k]) where xs[k] exists: state its expansion
+                // directly rather than re-deriving it through Len, At, and substitution.
+                let expansion = g.add(SymbolLang::new("If", vec![c, t, undef]));
+                changed |= g.union(read, expansion);
+                SymbolLang::new("Maybe", vec![z, read])
+            };
+            let maybe = g.add(maybe);
+            changed |= g.union(id, maybe);
+        }
+        if changed { vec![id] } else { vec![] }
+    }
+}
+// The f of maybe z f (xs !? k), abstracted from the present branch t. None unless t is
+// defined, varies with the element, and can collide with z: a constant t only observes
+// absence (isNothing), and a non-empty list never collides with the empty one.
+fn element_function(g: &mut Graph, t: Id, read: &[Id], present: Id, z: Id) -> Option<Id> {
+    let d = &g[t].data;
+    if d.boolean.is_some() || d.text.is_some() || num(g, t).is_some() {
+        return None;
+    }
+    let defined = d.integer
+        || d.string
+        || g[t].nodes.iter().any(|n| {
+            matches!(
+                op(n),
+                "Truthy" | "Not" | "StrictEq" | "EqI" | "Lt" | "Le" | "And" | "Or" | "Cons" | "Nil"
+            )
+        });
+    if !defined || (has(g, t, "Cons") && has(g, z, "Nil")) {
+        return None;
+    }
+    let binder = g.add(SymbolLang::leaf("@elem"));
+    if g[t].data.free.contains(&binder) {
+        return None;
+    }
+    let x = g.add(SymbolLang::new("Var", vec![binder]));
+    // The presence test is true wherever f runs; it is not a use of the element.
+    let body = abstract_read(g, t, read, x, &mut HashMap::from([(present, None)]))?;
+    Some(g.add(SymbolLang::new("Lam", vec![binder, body])))
+}
+// Rebuild one term of `id` with the read replaced by x, reusing every class that does not
+// mention it. Binders are never crossed, so x cannot be captured, and a class with a known
+// constant value never varies with the element. None means no term mentions the read.
+fn abstract_read(
+    g: &mut Graph,
+    id: Id,
+    read: &[Id],
+    x: Id,
+    seen: &mut HashMap<Id, Option<Id>>,
+) -> Option<Id> {
+    let id = g.find(id);
+    if read.contains(&id) {
+        return Some(x);
+    }
+    if let Some(&done) = seen.get(&id) {
+        return done; // Finished, or still open on this path: a cycle mentions nothing new.
+    }
+    let d = &g[id].data;
+    if d.boolean.is_some() || d.text.is_some() || num(g, id).is_some() {
+        return None;
+    }
+    seen.insert(id, None);
+    for mut n in g[id].nodes.clone() {
+        if matches!(op(&n), "Lam" | "Let") {
+            continue;
+        }
+        let mut hit = false;
+        for c in &mut n.children {
+            if let Some(r) = abstract_read(g, *c, read, x, seen) {
+                *c = r;
+                hit = true;
+            }
+        }
+        if hit {
+            let out = Some(g.add(n));
+            seen.insert(id, out);
+            return out;
+        }
+    }
+    None
+}
+// Apply a callback as JavaScript does: bind one parameter per argument and drop surplus
+// arguments. An opaque callee keeps curried App nodes.
+fn call(g: &mut Graph, f: Id, args: &[Id]) -> Id {
+    let mut body = f;
+    let mut binds = vec![];
+    for &a in args {
+        let Some(lam) = g[body].nodes.iter().find(|n| op(n) == "Lam").cloned() else {
+            break;
         };
-        let n = g.add(SymbolLang::new("Maybe", vec![s[v("?z")], m]));
-        if g.union(id, n) { vec![id] } else { vec![] }
+        binds.push((lam.children[0], a));
+        body = lam.children[1];
+    }
+    if binds.is_empty() {
+        return args
+            .iter()
+            .fold(f, |f, &a| g.add(SymbolLang::new("App", vec![f, a])));
+    }
+    for (var, a) in binds.into_iter().rev() {
+        body = g.add(SymbolLang::new("Let", vec![var, a, body]));
+    }
+    body
+}
+// every, some, and a filter's length over a list of at most one element: the callback
+// on xs[0] when it exists, and the empty-list answer when it does not.
+#[derive(Clone, Copy)]
+enum Walk {
+    Every,
+    Some,
+    Count,
+}
+impl Applier<SymbolLang, Facts> for Walk {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let xs = s[v("?xs")];
+        let len_node = SymbolLang::new("Len", vec![xs]);
+        let existed = g.lookup(len_node.clone());
+        let len = g.add(len_node);
+        if g[len].data.hi.is_none_or(|hi| hi > 1) {
+            return if existed.is_none() { vec![len] } else { vec![] };
+        }
+        let zero = add_form(g, Form::constant(0));
+        let read = g.add(SymbolLang::new("At", vec![xs, zero]));
+        let value = call(g, s[v("?f")], &[read, s[v("?k")]]);
+        let pass = g.add(SymbolLang::new("Truthy", vec![value]));
+        let present = g.add(SymbolLang::new("Lt", vec![zero, len]));
+        let constant = |g: &mut Graph, b: bool| {
+            let leaf = g.add(SymbolLang::leaf(if b { "true" } else { "false" }));
+            g.add(SymbolLang::new("B", vec![leaf]))
+        };
+        let (yes, absent) = match self {
+            Walk::Every => (pass, constant(g, true)),
+            Walk::Some => (pass, constant(g, false)),
+            Walk::Count => {
+                let one = add_form(g, Form::constant(1));
+                (g.add(SymbolLang::new("If", vec![pass, one, zero])), zero)
+            }
+        };
+        let out = g.add(SymbolLang::new("If", vec![present, yes, absent]));
+        if g.union(id, out) { vec![id] } else { vec![] }
     }
 }
 fn known(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
@@ -709,7 +886,11 @@ fn not_cons(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
 }
 fn expand_read(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let (a, b) = (v(a), v(b));
-    move |g, _, s| {
+    move |g, id, s| {
+        // Already expanded, e.g. by M1's mapped read.
+        if g[id].nodes.iter().any(|n| op(n) == "If" && has(g, n.children[2], "Undef")) {
+            return false;
+        }
         let (xs, k) = (s[a], s[b]);
         for n in &g[xs].nodes {
             match op(n) {

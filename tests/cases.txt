@@ -40,3 +40,13 @@ no cheat	names.map((n) => n + '!')
 no cheat	'a' === 'a'
 no cheat	'a' === 'b'
 no cheat	'a' === undefined
+# every over a list holding at most the element at i: maybe true (!== 'off') (names !? i).
+CHEAT	names.slice(i, i + 1).every((n) => n !== 'off')
+CHEAT	names[i] !== 'off'
+CHEAT	!names.slice(i, i + 1).some((n) => n === 'off')
+CHEAT	names.slice(i, i + 1).filter((n) => n === 'off').length === 0
+CHEAT	names[i] === undefined || names[i] !== 'off'
+CHEAT	names[i] === undefined ? true : names[i] !== 'off'
+no cheat	names.every((n) => n !== 'off')
+no cheat	names.slice(i, i + 1).map((n) => n !== 'off')
+no cheat	names.map((n, i) => names[i] !== 'off')

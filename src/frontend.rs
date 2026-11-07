@@ -23,6 +23,10 @@ struct Lower {
     scope: Vec<(String, Id)>,
     fresh: usize,
     intern: std::collections::HashMap<SymbolLang, Id>,
+    /// Receiver of the walker whose callback is lowered next.
+    walk: Option<Id>,
+    /// (receiver, index binder) for every enclosing walker callback.
+    walks: Vec<(Id, Id)>,
 }
 impl Lower {
     fn node(&mut self, op: &str, children: impl Into<Vec<Id>>) -> Id {
@@ -151,13 +155,7 @@ impl Lower {
     fn bind(&mut self, p: &BindingPattern<'_>, src: Id, body: Id) -> Id {
         match p {
             BindingPattern::BindingIdentifier(p) => {
-                let n = self
-                    .scope
-                    .iter()
-                    .rev()
-                    .find(|(n, _)| n == p.name.as_str())
-                    .unwrap()
-                    .1;
+                let n = self.lookup(p.name.as_str());
                 self.node("Let", vec![n, src, body])
             }
             BindingPattern::AssignmentPattern(p) => {
@@ -208,12 +206,23 @@ impl Lower {
         body: Option<&FunctionBody<'_>>,
         expression: Option<&Expression<'_>>,
     ) -> Id {
+        let walk = self.walk.take();
         if params.rest.is_some() {
             return self.unknown();
         }
         let mark = self.scope.len();
+        let walks = self.walks.len();
         for p in &params.items {
             self.declare(&p.pattern);
+        }
+        // A walker passes each element's own position, so receiver[index] is never absent.
+        if let Some(receiver) = walk
+            && let Some(p) = params.items.get(1)
+            && p.initializer.is_none()
+            && let BindingPattern::BindingIdentifier(id) = &p.pattern
+        {
+            let index = self.lookup(id.name.as_str());
+            self.walks.push((receiver, index));
         }
         let mut result = if let Some(e) = expression {
             self.expr(e)
@@ -228,13 +237,7 @@ impl Lower {
             if p.initializer.is_none()
                 && let BindingPattern::BindingIdentifier(id) = &p.pattern
             {
-                let n = self
-                    .scope
-                    .iter()
-                    .rev()
-                    .find(|(n, _)| n == id.name.as_str())
-                    .unwrap()
-                    .1;
+                let n = self.lookup(id.name.as_str());
                 result = self.node("Lam", vec![n, result]);
                 continue;
             }
@@ -248,7 +251,11 @@ impl Lower {
             result = self.node("Lam", vec![n, result]);
         }
         self.scope.truncate(mark);
+        self.walks.truncate(walks);
         result
+    }
+    fn lookup(&self, name: &str) -> Id {
+        self.scope.iter().rev().find(|(n, _)| n == name).unwrap().1
     }
     fn block(&mut self, stmts: &[Statement<'_>]) -> Id {
         let Some((first, rest)) = stmts.split_first() else {
@@ -393,6 +400,10 @@ impl Lower {
             Expression::ComputedMemberExpression(e) if !e.optional => {
                 let a = self.expr(&e.object);
                 let b = self.expr(&e.expression);
+                let index = &self.out[b];
+                if index.op.as_str() == "Var" && self.walks.contains(&(a, index.children[0])) {
+                    return self.node("At", vec![a, b]);
+                }
                 self.node("Elem", vec![a, b])
             }
             Expression::ArrayExpression(e) => {
@@ -422,20 +433,40 @@ impl Lower {
                 }
             }
             Expression::CallExpression(e) if !e.optional => {
+                let method = match &e.callee {
+                    Expression::StaticMemberExpression(m) if !m.optional => Some(m),
+                    Expression::StaticMemberExpression(_) => return self.unknown(),
+                    _ => None,
+                };
+                let receiver = method.map(|m| self.expr(&m.object));
+                let walker = method.is_some_and(|m| {
+                    matches!(
+                        m.property.name.as_str(),
+                        "map" | "filter" | "find" | "every" | "some"
+                    )
+                });
                 let mut args = vec![];
                 for a in &e.arguments {
-                    if let Some(a) = a.as_expression() {
-                        args.push(self.expr(a));
-                    } else {
+                    let Some(a) = a.as_expression() else {
                         return self.unknown();
+                    };
+                    if walker
+                        && matches!(
+                            a,
+                            Expression::ArrowFunctionExpression(_)
+                                | Expression::FunctionExpression(_)
+                        )
+                    {
+                        self.walk = receiver;
                     }
+                    args.push(self.expr(a));
+                    self.walk = None;
                 }
-                if let Expression::StaticMemberExpression(m) = &e.callee {
-                    if m.optional || args.len() > 2 {
+                if let (Some(m), Some(obj)) = (method, receiver) {
+                    if args.len() > 2 {
                         return self.unknown();
                     }
                     let name = self.leaf(m.property.name.as_str());
-                    let obj = self.expr(&m.object);
                     let op = format!("MCall{}", args.len());
                     let mut all = vec![name, obj];
                     all.extend(args);

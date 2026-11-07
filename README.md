@@ -1,8 +1,8 @@
 # omelette
 
-An in-process Rust probe for absence laundering in JavaScript/TypeScript expressions. For example, `widths.slice(i, i + 1).reduce((_, x) => x, 0)` replaces a potentially absent read with a written default. omelette proves this by finding a `Maybe(default, IndexQ(array, index))` representation.
+An in-process Rust probe for absence laundering in JavaScript/TypeScript expressions. For example, `widths.slice(i, i + 1).reduce((_, x) => x, 0)` replaces a potentially absent read with a written default. omelette proves this by finding a `Maybe(default, IndexQ(array, index))` representation. A function of the read launders it the same way: `names.slice(i, i + 1).every((n) => n !== 'off')` answers `true` when the element is missing, which is `maybe true (!== 'off') (names !? i)`, found as `Maybe(true, IndexQ(Map(f, names), i))`.
 
-The runtime uses **`egg`**, with **`oxc_parser` / `oxc_allocator`** for native parsing. There are no Node.js, TypeScript compiler, or parser subprocesses. All 40 golden cases pass and reach saturation: the original 29 cases plus 11 string regressions, including both index-equality `find` predicates. `widths.length ?? 0` resolves to `no cheat`. String defaults such as `'MODE'`, `'measures'`, `'none'`, and `''` use the same absence-elimination rules as numeric defaults.
+The runtime uses **`egg`**, with **`oxc_parser` / `oxc_allocator`** for native parsing. There are no Node.js, TypeScript compiler, or parser subprocesses. All 49 golden cases pass and reach saturation: the original 29 cases, 11 string regressions, and 9 `every` spellings and their non-cheats, including both index-equality `find` predicates. `widths.length ?? 0` resolves to `no cheat`. String defaults such as `'MODE'`, `'measures'`, `'none'`, and `''` use the same absence-elimination rules as numeric defaults.
 
 ## Run and embed
 
@@ -12,6 +12,7 @@ Requires Rust 1.97 or newer.
 cargo build --release
 ./target/release/omelette 'widths.find((_, idx) => idx === i) ?? 0'
 ./target/release/omelette "names[i] ?? 'unknown'"
+./target/release/omelette "names.slice(i, i + 1).every((n) => n !== 'off')"
 ./target/release/omelette 'widths.length ?? 0' --all
 ./target/release/omelette --joint 'widths.find((_, idx) => idx === i)' 'widths[i]'
 ./scripts/check.sh
@@ -39,41 +40,46 @@ assert!(result.saturated && result.consistent);
 The basis needs directed algebraic rules plus small interval and free-variable analyses. It does not require a general Datalog runtime. `egglog` made those analyses concise, but the supplied baseline was 10–53 ms of saturation alone. The native implementation removes the subprocess frontend and the per-expression Datalog setup and joins. It meets the sub-millisecond steady-state target for this basis on the measured host; this is not a worst-case guarantee for arbitrary JavaScript or operating-system scheduling.
 
 - [frontend.rs](src/frontend.rs) lowers the Oxc AST directly into terms. Addition, subtraction, negation, and constant multiplication become canonical affine forms **before entering egg**. Terms use integer coefficients instead of expanding constants into repeated units. Nonlinear multiplication stays opaque arithmetic.
+- Inside a `map`, `filter`, `find`, `every`, or `some` callback, `receiver[index]` with the callback's own index parameter lowers to the total read `At`: the walker only passes positions that exist. A different list, a shifted index, or a shadowed name stays a partial read.
 - String literals use `Str` with exact decoded UTF-16 values, including escape sequences and lone surrogates. Strict equality compares values without coercion. Addition with a known string operand uses ordered `Concat`, outside affine arithmetic; literal concatenations fold to strings. Consistency checks reject distinct string constants merging with each other or with numeric/boolean/undefined values.
 - [rules.rs](src/rules.rs) contains the directed `egg::rewrite!` rules. Explicit mirror rules handle `===`; there is no general equality commutation, association, or inverse arithmetic expansion. The former [rules.egg](src/rules.egg) remains as a historical specification, outside the runtime.
 - [engine.rs](src/engine.rs) tracks interval bounds and free variables. Globally fresh frontend binders and free-variable guards prevent capture during beta reduction. Arithmetic introduced by semantic rewrites uses the same affine representation, with checked integer operations and coefficient merging after e-class unions.
 - Index predicates lower to `Select`, a list containing at most the selected element. Projection then becomes an indexed read without distributing conditionals through the entire list. Short-list bounds are consumed directly by folds and reads. Structural rules skip cyclic identity representatives such as `Append(xs, Nil)` after it merges with `xs`.
-- The relational M1 lemma uses a hash-cons lookup for the matching partial read. Its applier reports only changed unions, so repeated matches do not falsely prevent saturation.
+- M1 recognizes `If(c, t, z)` where `c` is the presence test of a partial read `xs[k]`, found among the parents of `c` as the read's expansion `If(c, At(xs, k), Undef)`. When `t` is the read, it builds `Maybe(z, IndexQ(xs, k))`. When `t` is a defined value of the element, it abstracts `f = λx. t[xs[k] := x]` and builds `Maybe(z, IndexQ(Map(f, xs), k))`, stating the mapped read's expansion `If(c, t, Undef)` directly. It skips a constant `t` (that only observes absence, like `isNothing`) and a non-empty list against an empty `z` (`maybeToList`). The applier fires once per class and reports only changed unions.
+- `every`, `some`, and a filter's `length` over a list of at most one element become the callback on `xs[0]` when it exists and the empty-list answer (`true`, `false`, `0`) when it does not. Callbacks bind one parameter per argument and drop surplus arguments, as JavaScript does.
 
 The two-element slice sum is deliberately left as a fold: its length bound is `[0, 2]`, so the singleton-fold lemma cannot fire. Its regression test requires `no cheat`, saturation, consistency, and fewer than 150 e-nodes.
 
 ## Reproducible latency measurements
 
-[benchmarks/latency.txt](benchmarks/latency.txt) records a release-mode run with 500 samples per case on an Intel Core i7-8700K. [benchmarks/environment.txt](benchmarks/environment.txt) records the toolchain and command. Each case gets five warmups; samples interleave all 40 inputs. Each timed evaluation reparses the source and constructs a new graph. The benchmark reports runtime startup and the first evaluation separately, then p50/p95/p99/max latency for the steady-state loop.
+[benchmarks/latency.txt](benchmarks/latency.txt) records a release-mode run with 500 samples per case on an Intel Core i7-8700K. [benchmarks/environment.txt](benchmarks/environment.txt) records the toolchain and command. Each case gets five warmups; samples interleave all 49 inputs. Each timed evaluation reparses the source and constructs a new graph. The benchmark reports runtime startup and the first evaluation separately, then p50/p95/p99/max latency for the steady-state loop.
 
 Recorded results (microseconds; total includes graph disposal):
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 3.7 µs |
-| Worst per-case parser + lowering p95 | 20.0 µs |
-| Worst per-case total p95 / p99 | 432.6 / 680.3 µs |
-| Largest total among 20,000 samples | 784.2 µs |
-| Worst string-case total p95 | 336.7 µs |
-| Two-element sum total p50 / p95 | 138.5 / 158.8 µs |
+| Worst per-case parser p95 | 4.2 µs |
+| Worst per-case parser + lowering p95 | 24.3 µs |
+| Worst per-case total p95 / p99 | 716.9 / 1,053.4 µs |
+| Largest total among 24,500 samples | 1,254.9 µs |
+| Worst string-case total p95 | 486.9 µs |
+| Worst `every`-case total p95 | 716.9 µs |
+| Two-element sum total p50 / p95 | 143.0 / 181.6 µs |
 | Two-element sum graph / iterations | 28 / 5 |
-| All-case graph sizes / iterations | 5–74 / 1–9 |
-| One-time runtime initialization | 1,216.9 µs |
-| First evaluation after initialization | 351.5 µs |
+| All-case graph sizes / iterations | 5–101 / 1–11 |
+| One-time runtime initialization | 1,213.3 µs |
+| First evaluation after initialization | 274.8 µs |
 
-These are measured samples on this host, not scheduling guarantees.
+These are measured samples on this host, not scheduling guarantees. The worst case is `names.slice(i, i + 1).filter((n) => n === 'off').length === 0` (101 e-nodes, 11 iterations); its p99 and the largest sample exceed 1 ms, while the p95 threshold holds.
 
 The `--check` option requires every case's parser and parser-plus-lowering p95 to be below 50 µs, total p95 below 1 ms, and graph size below 150 e-nodes. Ordinary tests assert correctness and graph bounds without wall-clock thresholds. `scripts/check.sh` also rejects non-saturated runs, including cases whose expected verdict is `UNDECIDED`.
 
 ## Verdicts and model boundaries
 
-- `CHEAT`: a reachable class contains `Maybe(z, m)`, where `m` is an undetermined `IndexQ` and `z` is a written value.
+- `CHEAT`: a reachable class contains `Maybe(z, m)`, where `m` is an undetermined `IndexQ` (the read itself, or the read mapped through a function of the element) and `z` is a written value.
 - `no cheat`: saturation completed, the extracted expression has no unsupported syntax, and no such pattern was found.
 - `UNDECIDED`: unsupported syntax or unresolved callees remain, the engine reached a limit, or consistency checks failed.
 
-These verdicts concern the existing algebraic model, not general JavaScript safety. Numeric arithmetic models integers, not IEEE-754 behavior (`NaN`, infinities, rounding, and signed zero). String-to-number coercion and string ordering are outside the model. Lists are dense and in-bounds reads are assumed defined; sparse arrays and stored `undefined` values are outside the model. Records, mutation, side effects, and general control flow are not modeled. Blocks support straight-line `const` bindings and returning branches; logical operators retain the basis's boolean interpretation. Callbacks model the element and index, not the array argument. Unknown callees remain unresolved. Symbolic slice bounds remain semantic `Rel` terms until concrete bounds justify expansion.
+Comparing a possibly absent read against a defined value is therefore a cheat: `names[i] !== 'off'` is `true` for a missing element, and `widths[i] === 0` is `false`. Comparing it against `undefined` observes absence and is not. List results such as `map` or `filter` over `slice(i, i + 1)` keep the empty list as the absence answer and are not eliminations, but a filter's `length` is.
+
+These verdicts concern the existing algebraic model, not general JavaScript safety. Numeric arithmetic models integers, not IEEE-754 behavior (`NaN`, infinities, rounding, and signed zero). String-to-number coercion and string ordering are outside the model. Lists are dense and in-bounds reads are assumed defined; sparse arrays and stored `undefined` values are outside the model. Records, mutation, side effects, and general control flow are not modeled. Blocks support straight-line `const` bindings and returning branches; logical operators retain the basis's boolean interpretation. Callbacks model the element and index, not the array argument. `every`, `some`, and filter lengths expand only over lists of at most one element; longer lists stay `Every`, `Some`, and `Filteri` terms. Unknown callees remain unresolved. Symbolic slice bounds remain semantic `Rel` terms until concrete bounds justify expansion.

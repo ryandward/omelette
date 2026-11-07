@@ -32,6 +32,11 @@ fn make_rules() -> Vec<Rule> {
         rw!("m-call1-6"; "(MCall1 find ?xs ?f)" => "(IndexQ (Filteri ?f (Num 0) ?xs) (Num 0))"),
         rw!("m-call1-7"; "(MCall1 concat ?xs ?ys)" => "(Append ?xs ?ys)"),
         rw!("m-call0-2"; "(MCall0 toReversed ?xs)" => "(Reverse ?xs)"),
+        rw!("m-call1-every"; "(MCall1 every ?xs ?f)" => "(Every ?f (Num 0) ?xs)"),
+        rw!("m-call1-some"; "(MCall1 some ?xs ?f)" => "(Some ?f (Num 0) ?xs)"),
+        rw!("short-every"; "(Every ?f ?k ?xs)" => { Walk::Every }),
+        rw!("short-some"; "(Some ?f ?k ?xs)" => { Walk::Some }),
+        rw!("short-count"; "(Len (Filteri ?f ?k ?xs))" => { Walk::Count }),
         rw!("truthy-len"; "(Truthy (Len ?xs))" => "(Lt (Num 0) (Len ?xs))"),
         rw!("truthy-lt"; "(Truthy (Lt ?a ?b))" => "(Lt ?a ?b)"),
         rw!("truthy-le"; "(Truthy (Le ?a ?b))" => "(Le ?a ?b)"),
@@ -47,6 +52,8 @@ fn make_rules() -> Vec<Rule> {
         rw!("not-lt"; "(Not (Lt ?a ?b))" => "(Le ?b ?a)"),
         rw!("not-le"; "(Not (Le ?a ?b))" => "(Lt ?b ?a)"),
         rw!("not-not"; "(Not (Not ?a))" => "?a"),
+        rw!("not-if"; "(Not (If ?c ?a ?b))" => "(If ?c (Not ?a) (Not ?b))"),
+        rw!("or-if"; "(Or ?a ?b)" => "(If ?a (B true) ?b)"),
         rw!("and-b"; "(And (B true) ?a)" => "?a"),
         rw!("and-b-2"; "(And ?a (B true))" => "?a"),
         rw!("and-b-3"; "(And (B false) ?a)" => "(B false)"),
@@ -127,6 +134,6 @@ fn make_rules() -> Vec<Rule> {
         rw!("index-eq-mirror"; "(Filteri (Lam ?e (Lam ?idx (StrictEq ?j (Var ?idx)))) ?k ?xs)" => "(Select ?xs (Sub ?j ?k))" if different("?e","?idx") if independent("?e","?j") if independent("?idx","?j")),
         rw!("I1"; "(At ?xs ?k)" => SeedIndex),
     ];
-    rules.push(rw!("M1"; "(If ?c (At ?xs ?k) ?z)" => MaybeFromRead));
+    rules.push(rw!("M1"; "(If ?c ?t ?z)" => MaybeFromRead));
     rules
 }
