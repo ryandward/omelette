@@ -22,7 +22,9 @@ pub struct Data {
     pub elements: bool,
     /// A function whose result for a walker's (element, index) is defined.
     pub returns: bool,
-    /// A function with a resolved body, which a walker can actually apply.
+    /// A function's parameter count: its leading Lam layers.
+    pub params: usize,
+    /// A function of at most two parameters with a resolved body, which a walker can apply.
     pub callable: bool,
     /// Every representation contains unsupported syntax or an unresolved call.
     pub opaque: bool,
@@ -239,12 +241,15 @@ impl Analysis<SymbolLang> for Facts {
         };
         if op(n) == "Lam" {
             let body = k[1];
-            d.returns = if has(g, body, "Lam") {
+            let nested = has(g, body, "Lam");
+            d.params = 1 + if nested { g[body].data.params } else { 0 };
+            d.returns = if nested {
                 g[body].data.returns
             } else {
                 g[body].data.defined
             };
-            d.callable = !g[body].data.opaque;
+            // The model passes two arguments; a third parameter reads one it does not supply.
+            d.callable = d.params <= 2 && !g[body].data.opaque;
         }
         d.opaque = SYNTAX.contains(&op(n))
             || (HIGHER_ORDER.contains(&op(n)) && !c(0).callable)
@@ -269,6 +274,7 @@ impl Analysis<SymbolLang> for Facts {
         a.defined |= b.defined;
         a.elements |= b.elements;
         a.returns |= b.returns;
+        a.params = a.params.max(b.params);
         a.callable |= b.callable;
         a.opaque &= b.opaque;
         DidMerge(*a != old, *a != b)
@@ -805,7 +811,7 @@ impl Applier<SymbolLang, Facts> for SeedIndex {
     }
 }
 // M1: a branch on whether xs[k] exists, answering f(xs[k]) when it does and a written z
-// when it does not, is maybe z f (xs !? k). It is built as Maybe z (IndexQ (Map f xs) k),
+// when it does not, is maybe z f (xs !? k). It is built as Maybe z (IndexQ (Map f 0 xs) k),
 // fromMaybe over the mapped read; f = id is plain fromMaybe z (xs !? k). The partial read
 // is found by its expansion If c (At xs k) Undef among the parents of the branch condition.
 // Report only a changed union, so a successful match does not prevent saturation.
@@ -847,7 +853,8 @@ impl Applier<SymbolLang, Facts> for MaybeFromRead {
                 let Some(f) = element_function(g, t, &[at, m], c, z) else {
                     continue;
                 };
-                let map = g.add(SymbolLang::new("Map", vec![f, xs]));
+                let zero = add_form(g, Form::constant(0));
+                let map = g.add(SymbolLang::new("Map", vec![f, zero, xs]));
                 let read = g.add(SymbolLang::new("IndexQ", vec![map, k]));
                 // The mapped read is f(xs[k]) where xs[k] exists: state its expansion
                 // directly rather than re-deriving it through Len, At, and substitution.
@@ -948,22 +955,36 @@ fn abstract_read(
     }
     None
 }
-// Apply a callback as JavaScript does: bind one parameter per argument and drop surplus
-// arguments. An opaque callee keeps curried App nodes.
-fn call(g: &mut Graph, f: Id, args: &[Id]) -> Id {
+// Apply a callback to the model's two arguments as JavaScript does: bind one parameter per
+// argument and drop surplus arguments. An unknown free function becomes the curried App
+// chain, the same term as a direct call f(a, b). A callee with a parameter left unbound
+// reads an argument the model does not supply (the array, reduce's index), so the
+// application stays an unreduced Call2: curried App would let app-lam turn it into a
+// partial application.
+fn call(g: &mut Graph, f: Id, a: Id, b: Id) -> Id {
+    let args = [a, b];
     let mut body = f;
     let mut binds = vec![];
-    for &a in args {
+    for a in args {
         let Some(lam) = g[body].nodes.iter().find(|n| op(n) == "Lam").cloned() else {
             break;
         };
         binds.push((lam.children[0], a));
         body = lam.children[1];
     }
-    if binds.is_empty() {
+    // A parameter's arity is unknown until substitution supplies its value, so applying one
+    // waits as Call2. Only a free function is applied as the direct call f(a, b).
+    let parameter = g[f]
+        .nodes
+        .iter()
+        .any(|n| op(n) == "Var" && !g[n.children[0]].nodes[0].op.as_str().starts_with("free:"));
+    if binds.is_empty() && !parameter {
         return args
             .iter()
             .fold(f, |f, &a| g.add(SymbolLang::new("App", vec![f, a])));
+    }
+    if binds.is_empty() || has(g, body, "Lam") {
+        return g.add(SymbolLang::new("Call2", vec![f, a, b]));
     }
     for (var, a) in binds.into_iter().rev() {
         body = g.add(SymbolLang::new("Let", vec![var, a, body]));
@@ -1009,6 +1030,47 @@ impl Applier<SymbolLang, Facts> for AtCons {
         if g.union(id, out) { vec![id] } else { vec![] }
     }
 }
+// xs[k] on an append h ++ t: nothing below 0, h below len(h), t at k - len(h) above. A known
+// index and length take their one branch, as in AtCons.
+#[derive(Clone)]
+struct AtAppend;
+impl Applier<SymbolLang, Facts> for AtAppend {
+    fn apply_one(
+        &self,
+        g: &mut Graph,
+        id: Id,
+        s: &Subst,
+        _: Option<&PatternAst<SymbolLang>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        let (h, t, k) = (s[v("?h")], s[v("?t")], s[v("?k")]);
+        let len = g.add(SymbolLang::new("Len", vec![h]));
+        let tail = |g: &mut Graph| {
+            let k = form(g, k).plus(&form(g, len), -1)?;
+            let k = add_form(g, k);
+            Some(g.add(SymbolLang::new("At", vec![t, k])))
+        };
+        let out = match (num(g, k), num(g, len)) {
+            (Some(n), _) if n < 0 => g.add(SymbolLang::leaf("Oob")),
+            (Some(n), Some(l)) if n < l => g.add(SymbolLang::new("At", vec![h, k])),
+            (Some(_), Some(_)) => match tail(g) {
+                Some(read) => read,
+                None => return vec![],
+            },
+            _ => {
+                let Some(read) = tail(g) else { return vec![] };
+                let zero = add_form(g, Form::constant(0));
+                let oob = g.add(SymbolLang::leaf("Oob"));
+                let head = g.add(SymbolLang::new("At", vec![h, k]));
+                let in_head = g.add(SymbolLang::new("Lt", vec![k, len]));
+                let above = g.add(SymbolLang::new("If", vec![in_head, head, read]));
+                let below = g.add(SymbolLang::new("Lt", vec![k, zero]));
+                g.add(SymbolLang::new("If", vec![below, oob, above]))
+            }
+        };
+        if g.union(id, out) { vec![id] } else { vec![] }
+    }
+}
 // A rule's callback application, Call2 f a b, reduced by the one arity-aware helper.
 #[derive(Clone)]
 struct Call2;
@@ -1021,7 +1083,7 @@ impl Applier<SymbolLang, Facts> for Call2 {
         _: Option<&PatternAst<SymbolLang>>,
         _: Symbol,
     ) -> Vec<Id> {
-        let out = call(g, s[v("?f")], &[s[v("?a")], s[v("?b")]]);
+        let out = call(g, s[v("?f")], s[v("?a")], s[v("?b")]);
         if g.union(id, out) { vec![id] } else { vec![] }
     }
 }
@@ -1055,7 +1117,7 @@ impl Applier<SymbolLang, Facts> for Walk {
         let zero = add_form(g, Form::constant(0));
         let read = g.add(SymbolLang::new("At", vec![xs, zero]));
         let pass = |g: &mut Graph| {
-            let value = call(g, s[v("?f")], &[read, s[v("?k")]]);
+            let value = call(g, s[v("?f")], read, s[v("?k")]);
             g.add(SymbolLang::new("Truthy", vec![value]))
         };
         let present = g.add(SymbolLang::new("Lt", vec![zero, len]));
@@ -1115,6 +1177,11 @@ impl Applier<SymbolLang, Facts> for Compare {
         if g.union(id, out) { vec![id] } else { vec![] }
     }
 }
+// A body that is itself a function is a further parameter the fold does not bind.
+fn not_function(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| !has(g, s[a], "Lam")
+}
 fn not_identity(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let (a, b) = (v(a), v(b));
     move |g, _, s| {
@@ -1149,9 +1216,11 @@ fn expand_read(a: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
                 "Select" => return false,
                 "Filteri" if index_predicate(g, n.children[0]) => return false,
                 "Append" if num(g, k) == Some(0) && has(g, n.children[1], "Cons") => return false,
+                // prefix-last owns xs[len(tail)] while that length is unknown.
                 "Cons" => {
                     if let Some(len) = g.lookup(SymbolLang::new("Len", vec![n.children[1]]))
                         && g.find(len) == g.find(k)
+                        && num(g, len).is_none()
                     {
                         return false;
                     }
@@ -1249,7 +1318,7 @@ impl Applier<SymbolLang, Facts> for ShortFold {
         });
         let value = match affine {
             Some(f) => add_form(g, f),
-            None => call(g, s[v("?f")], &[s[v("?z")], read]),
+            None => call(g, s[v("?f")], s[v("?z")], read),
         };
         let c = g.add(SymbolLang::new("Lt", vec![zero, len]));
         let out = g.add(SymbolLang::new("If", vec![c, value, s[v("?z")]]));

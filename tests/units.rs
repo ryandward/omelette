@@ -3,10 +3,11 @@ mod common;
 use common::checked;
 use omelette::engine::{Evaluation, Verdict, evaluate_joint};
 
-/// maybe true (!== 'off') (names !? i), as the engine spells it.
-const EVERY: &str = "(Maybe (B true) (IndexQ (Map (Lam @elem (Not (StrictEq (Var @elem) (Str utf16:006f00660066)))) (Var free:names)) (Var free:i)))";
+/// maybe true (!== 'off') (names !? i), as the engine spells it: Map f 0 xs maps f over xs
+/// with indexes counted from 0.
+const EVERY: &str = "(Maybe (B true) (IndexQ (Map (Lam @elem (Not (StrictEq (Var @elem) (Str utf16:006f00660066)))) (Num 0) (Var free:names)) (Var free:i)))";
 /// maybe false (=== 'on') (names !? i).
-const SOME: &str = "(Maybe (B false) (IndexQ (Map (Lam @elem (StrictEq (Var @elem) (Str utf16:006f006e))) (Var free:names)) (Var free:i)))";
+const SOME: &str = "(Maybe (B false) (IndexQ (Map (Lam @elem (StrictEq (Var @elem) (Str utf16:006f006e))) (Num 0) (Var free:names)) (Var free:i)))";
 
 /// Every Maybe z (IndexQ xs k) witness in the root class.
 fn witnesses(r: &Evaluation) -> Vec<String> {
@@ -74,7 +75,7 @@ fn walkers_over_a_short_slice_map_the_callback_over_the_read() {
         let w = witnesses(&r);
         assert!(
             w.iter().any(
-                |w| w.starts_with(&format!("(Maybe (B {z}) (IndexQ (Map {ne} "))
+                |w| w.starts_with(&format!("(Maybe (B {z}) (IndexQ (Map {ne} (Num 0) "))
                     && w.ends_with(" (Num 0)))")
             ),
             "{source}: {w:?}"
@@ -176,7 +177,7 @@ fn join_and_flat_default_a_missing_element_to_their_unit() {
         let w = witnesses(&r);
         assert!(
             w.iter().any(
-                |w| w.starts_with(&format!("(Maybe {unit} (IndexQ (Map {f} "))
+                |w| w.starts_with(&format!("(Maybe {unit} (IndexQ (Map {f} (Num 0) "))
                     && w.ends_with(" (Num 0)))")
             ),
             "{source}: {w:?}"

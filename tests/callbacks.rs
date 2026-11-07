@@ -1,6 +1,6 @@
 mod common;
 use common::checked;
-use omelette::engine::{Verdict, evaluate_joint};
+use omelette::engine::{Verdict, evaluate, evaluate_joint};
 
 /// Saturate the sources together and report which roots share a class.
 fn same(sources: &[&str]) -> Vec<bool> {
@@ -118,7 +118,33 @@ fn a_callback_reading_an_unmodeled_argument_is_unsupported() {
         "[1, 2].reduce((a, b, k) => a + k, 0)",
         "xs.map((x, k, arr) => arr[k])",
         "xs.filter(function (x, k, arr) { return arr.length > k; })",
+        // Bound first, the callback's arity is known only after substitution.
+        "((g) => [10, 20].reduce(g, 0))((a, b, k) => k)",
+        "((g) => xs.map(g))((x, k, arr) => arr)",
     ] {
         checked(source, Verdict::Undecided);
+    }
+}
+
+#[test]
+fn map_unfolds_literal_lists_with_their_indexes() {
+    for (source, expected) in [
+        (
+            "[1, 2].map((x, k) => x + k)",
+            "(Cons (Num 1) (Cons (Num 3) Nil))",
+        ),
+        (
+            "['a', 'b'].map((s) => s + '!').join('')",
+            "(Str utf16:0061002100620021)",
+        ),
+        ("[[1], [2]].flatMap((g) => g).length", "(Num 2)"),
+        // A present element read through flatMap on a literal is not a cheat.
+        ("[[1], [2]].flatMap((g) => g)[0] ?? 0", "(Num 1)"),
+        ("((g) => [1, 2].reduce(g, 0))((a, b) => a + b)", "(Num 3)"),
+    ] {
+        let r = evaluate(source).unwrap();
+        assert!(r.saturated && r.consistent, "{source}");
+        assert_eq!(r.verdict, Verdict::NoCheat, "{source}");
+        assert_eq!(r.canonical.to_string(), expected, "{source}");
     }
 }

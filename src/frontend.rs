@@ -493,19 +493,6 @@ impl Lower {
                         "map" | "filter" | "find" | "every" | "some" | "flatMap"
                     )
                 });
-                // The model passes a callback two arguments: (element, index) for a walker,
-                // (accumulator, element) for reduce. A callback that declares more reads what
-                // the model does not supply (the array, reduce's index), so it is unsupported.
-                let modeled = walker || method.is_some_and(|m| m.property.name == "reduce");
-                if modeled
-                    && e.arguments.iter().any(|a| match a.as_expression() {
-                        Some(Expression::ArrowFunctionExpression(f)) => f.params.items.len() > 2,
-                        Some(Expression::FunctionExpression(f)) => f.params.items.len() > 2,
-                        _ => false,
-                    })
-                {
-                    return self.unknown();
-                }
                 let mut args = vec![];
                 for a in &e.arguments {
                     let Some(a) = a.as_expression() else {
