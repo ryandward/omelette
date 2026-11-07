@@ -1,5 +1,5 @@
 //! Witness detection: which flows swallow a read that may be missing.
-use super::analysis::{Const, Graph};
+use super::analysis::{Const, Graph, in_range};
 use crate::core::{Core, Family, Kind};
 use egg::{Id, Language};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -120,11 +120,9 @@ fn family(g: &Graph, flow: Id) -> Option<Family> {
     })
 }
 
-/// A read not proven present or missing.
+/// A read not proven in or out of range.
 fn undetermined(g: &Graph, id: Id) -> bool {
-    let class = &g[id];
-    class.nodes.iter().any(|n| matches!(n, Core::Read(_)))
-        && !class.nodes.iter().any(|n| matches!(n, Core::At(_) | Core::Undef))
+    g[id].nodes.iter().any(|n| matches!(n, Core::Read(_))) && in_range(g, id).is_none()
 }
 
 /// The lambda's body, for each lambda in its class.

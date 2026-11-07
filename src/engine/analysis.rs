@@ -82,6 +82,24 @@ pub fn int(g: &Graph, id: Id) -> Option<i64> {
         _ => None,
     }
 }
+/// The in-range tests of a read: the `c` of each `If(c, At(..), Undef)` in its class.
+pub fn range_tests(g: &Graph, read: Id) -> impl Iterator<Item = Id> + '_ {
+    g[read].nodes.iter().filter_map(move |n| match n {
+        Core::If([c, at, undef])
+            if g[*at].nodes.iter().any(|n| matches!(n, Core::At(_))) && g[*undef].nodes.iter().any(|n| matches!(n, Core::Undef)) =>
+        {
+            Some(g.find(*c))
+        }
+        _ => None,
+    })
+}
+
+/// Whether a read is proven in range (`true`) or out of range (`false`). A read whose
+/// element is `undefined` is still present: only its range test decides.
+pub fn in_range(g: &Graph, read: Id) -> Option<bool> {
+    range_tests(g, read).find_map(|c| boolean(g, c))
+}
+
 fn boolean(g: &Graph, id: Id) -> Option<bool> {
     match g[id].data.constant {
         Some(Const::Bool(b)) => Some(b),

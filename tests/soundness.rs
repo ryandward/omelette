@@ -117,3 +117,9 @@ fn an_unknown_in_the_present_branch_leaves_the_witness_undecided() {
     cheat("xs.slice(i, i + 1).join(s)", &[Family::Unit]);
     cheat("xs.slice(i, i + 1).every((n) => n > k)", &[Family::Unit]);
 }
+
+#[test]
+fn a_present_element_that_is_undefined_is_not_missing() {
+    // The read is in range; its element's value is `undefined`, which egg also proves.
+    value("[undefined, ...ys].map((x) => 5)[0]", "5");
+}

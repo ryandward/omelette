@@ -1,5 +1,5 @@
 //! Equational laws over the core IR. No rule simulates JavaScript.
-use super::analysis::{Facts, Graph, class_form, form_of, int};
+use super::analysis::{Facts, Graph, class_form, form_of, in_range, int, range_tests};
 use crate::affine::Form;
 use crate::core::Core;
 use egg::{Applier, Id, PatternAst, Rewrite, Subst, Symbol, Var, rewrite as rw};
@@ -58,6 +58,7 @@ fn witnesses() -> Vec<Rule> {
         rw!("append-default"; "(read (append ?a (cons ?z ?t)) 0)" => "(maybe default ?z (lam elem:@0 elem:@0) (read ?a 0))"),
         rw!("prefix-last"; "(read (cons ?z ?xs) (len ?xs))" => Last),
         rw!("maybe-absent"; "(maybe ?fam ?z ?f ?r)" => "?z" if absent("?r")),
+        rw!("maybe-present"; "(maybe ?fam ?z (lam ?e ?b) ?r)" => "?b" if present("?r", "?b")),
         rw!("maybe-value"; "(maybe ?fam ?z ?f ?r)" => "(elim ?z ?f ?r)"),
         rw!("presence-absent"; "(maybe ?fam (if ?c ?a ?b) ?f ?r)" => "(maybe ?fam ?b ?f ?r)" if presence("?r", "?c")),
         rw!("presence-present"; "(maybe ?fam ?z (lam ?e (if ?c ?a ?b)) ?r)" => "(maybe ?fam ?z (lam ?e ?a) ?r)" if presence("?r", "?c")),
@@ -186,24 +187,23 @@ fn identity(g: &mut Graph) -> Id {
     g.add(Core::Lam(vec![elem, elem].into()))
 }
 
-/// The read is proven missing.
+/// The read is proven out of range.
 fn absent(r: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let r = var(r);
-    move |g, _, s| g[s[r]].nodes.iter().any(|n| matches!(n, Core::Undef))
+    move |g, _, s| in_range(g, s[r]) == Some(false)
 }
 
-/// `c` is the read's presence test: its expansion is `If(c, At(..), Undef)`.
+/// The read is proven in range and the present branch `b` is a constant.
+fn present(r: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let (r, b) = (var(r), var(b));
+    move |g, _, s| in_range(g, s[r]) == Some(true) && g[s[b]].data.constant.is_some()
+}
+
+/// `c` is the read's presence test.
 fn presence(r: &str, c: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let (r, c) = (var(r), var(c));
     move |g, _, s| {
         let test = g.find(s[c]);
-        g[s[r]].nodes.iter().any(|n| match n {
-            Core::If([cond, at, undef]) => {
-                g.find(*cond) == test
-                    && g[*at].nodes.iter().any(|n| matches!(n, Core::At(_)))
-                    && g[*undef].nodes.iter().any(|n| matches!(n, Core::Undef))
-            }
-            _ => false,
-        })
+        range_tests(g, s[r]).any(|t| t == test)
     }
 }
