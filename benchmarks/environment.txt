@@ -1,7 +1,7 @@
 CPU: Intel Core i7-8700K @ 3.70GHz, 6 cores / 12 threads
 OS: Linux x86_64
 Build: cargo release defaults, no target-cpu override
-Protocol: 5 warmups per expression, 500 interleaved samples for each of 66 cases
+Protocol: 5 warmups per expression, 500 interleaved samples for each of 73 cases
 Command: cargo run --release --example latency -- 500 --check
 Timing: std::time::Instant; fresh parser arena and e-graph on every evaluation
 End-to-end: parse, lower, construct graph, saturate, consistency, verdict, extraction, graph disposal
@@ -11,4 +11,4 @@ No CPU pinning, no result cache, no Node.js or tsc
 Threshold checks: per-case p95 parse <50 us, parse/lower <50 us, total <1000 us, nodes <150
 rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)
 cargo 1.99.1 (5f94df478 2026-08-27) (Arch Linux rust 1:1.99.1-1)
-Recorded: 2026-11-07 06:32:41 UTC
+Recorded: 2026-11-07 06:47:16 UTC

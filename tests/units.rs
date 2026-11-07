@@ -145,3 +145,69 @@ fn callbacks_bind_one_parameter_per_argument() {
         assert_eq!(r.canonical.to_string(), expected, "{source}");
     }
 }
+
+#[test]
+fn join_and_flat_default_a_missing_element_to_their_unit() {
+    // join writes '' and flat writes [] when the slice is empty: maybe '' text and
+    // maybe [] spread over the one-element slice.
+    for (source, unit, f) in [
+        (
+            "names.slice(i, i + 1).join('')",
+            "(Str utf16:)",
+            "(Lam @elem (JoinText (Var @elem)))",
+        ),
+        (
+            "names.slice(i, i + 1).join(', ')",
+            "(Str utf16:)",
+            "(Lam @elem (JoinText (Var @elem)))",
+        ),
+        (
+            "groups.slice(i, i + 1).flat()",
+            "Nil",
+            "(Lam @elem (Spread (Var @elem)))",
+        ),
+        (
+            "groups.slice(i, i + 1).flatMap((g) => g)",
+            "Nil",
+            "(Lam @elem (Spread (Var @elem)))",
+        ),
+    ] {
+        let r = checked(source, Verdict::Cheat);
+        let w = witnesses(&r);
+        assert!(
+            w.iter().any(
+                |w| w.starts_with(&format!("(Maybe {unit} (IndexQ (Map {f} "))
+                    && w.ends_with(" (Num 0)))")
+            ),
+            "{source}: {w:?}"
+        );
+    }
+    for source in [
+        "names.join(', ')",
+        "groups.flat()",
+        "groups.slice(i, i + 1).map((g) => g)",
+    ] {
+        checked(source, Verdict::NoCheat);
+    }
+}
+
+#[test]
+fn join_and_flat_evaluate_literal_lists() {
+    for (source, expected) in [
+        ("['a', 'b'].join('-')", "(Str utf16:0061002d0062)"),
+        ("[1, 2].join('')", "(Str utf16:00310032)"),
+        ("['a'].join()", "(Str utf16:0061)"),
+        (
+            "[true, undefined].join('|')",
+            "(Str utf16:0074007200750065007c)",
+        ),
+        ("[].join(',')", "(Str utf16:)"),
+        // flat spreads a list element one level and keeps any other element.
+        ("[[1, 2], [3]].flat().length", "(Num 3)"),
+        ("[[1, 2], 3].flat().length", "(Num 3)"),
+        ("[1, 2].flat().length", "(Num 2)"),
+    ] {
+        let r = checked(source, Verdict::NoCheat);
+        assert_eq!(r.canonical.to_string(), expected, "{source}");
+    }
+}

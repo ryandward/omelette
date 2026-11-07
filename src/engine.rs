@@ -88,6 +88,28 @@ impl Analysis<SymbolLang> for Facts {
                 d.string = true;
                 (None, None)
             }
+            "Join" => {
+                d.string = true;
+                (None, None)
+            }
+            // The text join writes for an element: its string, its numeral, true or false,
+            // and nothing for undefined.
+            "JoinText" => {
+                d.string = true;
+                let c = &g[k[0]].data;
+                d.text = if c.text.is_some() {
+                    c.text
+                } else if let Some(n) = num(g, k[0]) {
+                    Some(crate::frontend::text_key(n.to_string().encode_utf16()).into())
+                } else if let Some(b) = c.boolean {
+                    Some(crate::frontend::text_key(b.to_string().encode_utf16()).into())
+                } else if has(g, k[0], "Undef") {
+                    Some(crate::frontend::text_key([]).into())
+                } else {
+                    None
+                };
+                (None, None)
+            }
             "Concat" => {
                 d.string = true;
                 if let (Some(a), Some(b)) = (g[k[0]].data.text, g[k[1]].data.text) {
@@ -197,7 +219,7 @@ impl Analysis<SymbolLang> for Facts {
                 "StrictEq" | "EqI" | "Lt" | "Le" | "Not" | "And" | "Or" | "Truthy" => true,
                 "Every" | "Some" | "Lam" => true,
                 "Nil" | "Cons" | "Append" | "Sublist" | "Reverse" | "Select" | "Filteri" => true,
-                "Map" => true,
+                "Map" | "Flat" | "Spread" => true,
                 // An in-bounds read is exactly as defined as the list's elements.
                 "At" => c(0).elements,
                 "If" => c(1).defined && c(2).defined,
@@ -314,6 +336,38 @@ fn unknown_length(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     move |g, _, s| {
         g.lookup(SymbolLang::new("Len", vec![s[a]]))
             .is_none_or(|len| num(g, len).is_none())
+    }
+}
+fn string(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| g[s[a]].data.string
+}
+// A known list, or a known non-list value: what flat spreads, and what it wraps.
+fn list(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| {
+        g[s[a]].nodes.iter().any(|n| {
+            matches!(
+                op(n),
+                "Nil"
+                    | "Cons"
+                    | "Append"
+                    | "Sublist"
+                    | "Map"
+                    | "Filteri"
+                    | "Select"
+                    | "Reverse"
+                    | "Flat"
+                    | "Spread"
+            )
+        })
+    }
+}
+fn scalar(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let a = v(a);
+    move |g, _, s| {
+        let d = &g[s[a]].data;
+        d.integer || d.string || d.boolean.is_some()
     }
 }
 fn defined(a: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
@@ -444,7 +498,14 @@ impl CostFunction<SymbolLang> for Cost<'_> {
     {
         let unresolved = SYNTAX.contains(&op(n))
             || (HIGHER_ORDER.contains(&op(n)) && !self.0[n.children[0]].data.callable);
-        let own = if unresolved { 10000 } else { 1 };
+        // A known constant is the canonical spelling of its value, so it wins every tie.
+        let own = if unresolved {
+            10000
+        } else if matches!(op(n), "Num" | "B" | "Str") {
+            0
+        } else {
+            1
+        };
         n.children
             .iter()
             .fold(own, |a, &id| a.saturating_add(costs(id)))
@@ -535,8 +596,13 @@ pub fn evaluate_with_limits(
         if !seen.insert(id) {
             continue;
         }
+        // A class with a reduced representation is that value. An unreduced binding or
+        // application beside it describes the function before its argument, not this value.
+        let reduced = !r.egraph[id].data.opaque;
         for n in &r.egraph[id].nodes {
-            stack.extend(&n.children);
+            if !(reduced && SYNTAX.contains(&op(n))) {
+                stack.extend(&n.children);
+            }
             if op(n) == "Maybe" {
                 let (z, m) = (n.children[0], n.children[1]);
                 // An undetermined read: not proven present (At), absent, or defined.
@@ -959,13 +1025,16 @@ impl Applier<SymbolLang, Facts> for Call2 {
         if g.union(id, out) { vec![id] } else { vec![] }
     }
 }
-// every, some, and a filter's length over a list of at most one element: the callback
-// on xs[0] when it exists, and the empty-list answer when it does not.
+// every, some, a filter's length, join, and flat over a list of at most one element: the
+// operation on xs[0] when it exists, and its empty-list value (the unit of its monoid:
+// true, false, 0, '', []) when it does not.
 #[derive(Clone, Copy)]
 enum Walk {
     Every,
     Some,
     Count,
+    Join,
+    Flat,
 }
 impl Applier<SymbolLang, Facts> for Walk {
     fn apply_one(
@@ -985,20 +1054,32 @@ impl Applier<SymbolLang, Facts> for Walk {
         }
         let zero = add_form(g, Form::constant(0));
         let read = g.add(SymbolLang::new("At", vec![xs, zero]));
-        let value = call(g, s[v("?f")], &[read, s[v("?k")]]);
-        let pass = g.add(SymbolLang::new("Truthy", vec![value]));
+        let pass = |g: &mut Graph| {
+            let value = call(g, s[v("?f")], &[read, s[v("?k")]]);
+            g.add(SymbolLang::new("Truthy", vec![value]))
+        };
         let present = g.add(SymbolLang::new("Lt", vec![zero, len]));
         let constant = |g: &mut Graph, b: bool| {
             let leaf = g.add(SymbolLang::leaf(if b { "true" } else { "false" }));
             g.add(SymbolLang::new("B", vec![leaf]))
         };
         let (yes, absent) = match self {
-            Walk::Every => (pass, constant(g, true)),
-            Walk::Some => (pass, constant(g, false)),
+            Walk::Every => (pass(g), constant(g, true)),
+            Walk::Some => (pass(g), constant(g, false)),
             Walk::Count => {
+                let pass = pass(g);
                 let one = add_form(g, Form::constant(1));
                 (g.add(SymbolLang::new("If", vec![pass, one, zero])), zero)
             }
+            Walk::Join => {
+                let empty = g.add(SymbolLang::leaf(crate::frontend::text_key([])));
+                let empty = g.add(SymbolLang::new("Str", vec![empty]));
+                (g.add(SymbolLang::new("JoinText", vec![read])), empty)
+            }
+            Walk::Flat => (
+                g.add(SymbolLang::new("Spread", vec![read])),
+                g.add(SymbolLang::leaf("Nil")),
+            ),
         };
         let out = g.add(SymbolLang::new("If", vec![present, yes, absent]));
         if g.union(id, out) { vec![id] } else { vec![] }

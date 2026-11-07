@@ -69,3 +69,11 @@ UNDECIDED	[1, 2].map(f)[0]
 UNDECIDED	xs.filter(p)
 UNDECIDED	xs.filter((x, k) => p(x, k))
 no cheat	[1, 2].map((x) => undefined)[0] ?? 0
+# join, flat, and flatMap: a missing element yields the unit of the operation's monoid.
+CHEAT	names.slice(i, i + 1).join('')
+CHEAT	names.slice(i, i + 1).join(', ')
+no cheat	names.join(', ')
+CHEAT	groups.slice(i, i + 1).flat()
+CHEAT	groups.slice(i, i + 1).flatMap((g) => g)
+no cheat	groups.flat()
+no cheat	groups.slice(i, i + 1).map((g) => g)

@@ -110,3 +110,15 @@ fn a_walker_over_an_unknown_function_is_an_unresolved_call() {
         checked(source, Verdict::Cheat);
     }
 }
+
+#[test]
+fn a_callback_reading_an_unmodeled_argument_is_unsupported() {
+    // The model passes two arguments; the array and reduce's index are not supplied.
+    for source in [
+        "[1, 2].reduce((a, b, k) => a + k, 0)",
+        "xs.map((x, k, arr) => arr[k])",
+        "xs.filter(function (x, k, arr) { return arr.length > k; })",
+    ] {
+        checked(source, Verdict::Undecided);
+    }
+}

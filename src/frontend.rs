@@ -1,6 +1,7 @@
 //! Native lowering from the Oxc AST, with the normalizations that belong at the boundary:
-//! canonical affine sums, decoded string values, globally fresh binders, total reads of a
-//! walker's own receiver at its index, and eta-reduction of full-arity callbacks.
+//! canonical affine sums, decoded string values, globally fresh binders, constant indexes
+//! into array literals, total reads of a walker's own receiver at its index, and
+//! eta-reduction of full-arity callbacks.
 use egg::{Id, Language, RecExpr, SymbolLang};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -8,6 +9,16 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use oxc_syntax::operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U};
 use std::fmt::Write;
+
+/// A string's identity: its decoded UTF-16 code units, including lone surrogates. Raw
+/// spelling and lossy Unicode display are not string identity.
+pub(crate) fn text_key(units: impl IntoIterator<Item = u16>) -> String {
+    let mut key = String::from("utf16:");
+    for unit in units {
+        write!(&mut key, "{unit:04x}").unwrap();
+    }
+    key
+}
 
 pub fn parse(source: &str) -> Result<RecExpr<SymbolLang>, String> {
     let arena = Allocator::default();
@@ -341,13 +352,7 @@ impl Lower {
                 self.node("B", vec![b])
             }
             Expression::StringLiteral(n) => {
-                // Key by decoded UTF-16 code units, including lone surrogates.
-                // Raw spelling and lossy Unicode display are not string identity.
-                let mut value = String::from("utf16:");
-                for unit in n.value.encode_utf16() {
-                    write!(&mut value, "{unit:04x}").unwrap();
-                }
-                let value = self.leaf(&value);
+                let value = self.leaf(&text_key(n.value.encode_utf16()));
                 self.node("Str", vec![value])
             }
             Expression::Identifier(n) => {
@@ -422,6 +427,25 @@ impl Lower {
                 self.node("Prop", vec![a, p])
             }
             Expression::ComputedMemberExpression(e) if !e.optional => {
+                // A constant index into an array literal is that element, or undefined past
+                // its end: a constant, decided here rather than by bounds rules in egg.
+                if let Expression::ArrayExpression(list) = e.object.without_parentheses()
+                    && let Expression::NumericLiteral(n) = e.expression.without_parentheses()
+                    && n.value.fract() == 0.0
+                    && (0.0..=u32::MAX as f64).contains(&n.value)
+                {
+                    let k = n.value as usize;
+                    let plain = |e: &ArrayExpressionElement| e.as_expression().is_some();
+                    match list.elements.get(k) {
+                        Some(el) if list.elements[..k].iter().all(plain) => {
+                            if let Some(el) = el.as_expression() {
+                                return self.expr(el);
+                            }
+                        }
+                        None if list.elements.iter().all(plain) => return self.leaf("Undef"),
+                        _ => {}
+                    }
+                }
                 let a = self.expr(&e.object);
                 let b = self.expr(&e.expression);
                 let index = &self.out[b];
@@ -466,9 +490,22 @@ impl Lower {
                 let walker = method.is_some_and(|m| {
                     matches!(
                         m.property.name.as_str(),
-                        "map" | "filter" | "find" | "every" | "some"
+                        "map" | "filter" | "find" | "every" | "some" | "flatMap"
                     )
                 });
+                // The model passes a callback two arguments: (element, index) for a walker,
+                // (accumulator, element) for reduce. A callback that declares more reads what
+                // the model does not supply (the array, reduce's index), so it is unsupported.
+                let modeled = walker || method.is_some_and(|m| m.property.name == "reduce");
+                if modeled
+                    && e.arguments.iter().any(|a| match a.as_expression() {
+                        Some(Expression::ArrowFunctionExpression(f)) => f.params.items.len() > 2,
+                        Some(Expression::FunctionExpression(f)) => f.params.items.len() > 2,
+                        _ => false,
+                    })
+                {
+                    return self.unknown();
+                }
                 let mut args = vec![];
                 for a in &e.arguments {
                     let Some(a) = a.as_expression() else {

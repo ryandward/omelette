@@ -5,9 +5,9 @@
 // - === has explicit mirror rules; there is no general commutation or association.
 // - Short-list structure is exposed only at its consumers. Rel and At(Sublist) stay semantic
 //   primitives until concrete endpoints justify opening their definitions. The short-list
-//   folds and the relational read lemmas (prefix-last, short-last, seeding a partial read)
-//   serve symbolic positions; a literal Cons or Nil belongs to at-cons, foldl-cons, and
-//   filteri-cons.
+//   folds and the relational read lemmas (prefix-last, short-last) leave literal lists
+//   alone, and no partial read is seeded at a known position of a literal: a literal Cons
+//   or Nil belongs to at-cons, foldl-cons, filteri-cons, join-cons, and flat-cons.
 // - Distribution never enters an If whose condition is decided: the class already holds the
 //   live branch, and the dead one can unfold forever.
 // - Comparison and negation rewrites stop once a class's boolean is known, and integer
@@ -45,6 +45,21 @@ fn make_rules() -> Vec<Rule> {
         rw!("short-every"; "(Every ?f ?k ?xs)" => { Walk::Every }),
         rw!("short-some"; "(Some ?f ?k ?xs)" => { Walk::Some }),
         rw!("short-count"; "(Len (Filteri ?f ?k ?xs))" => { Walk::Count } if not_literal("?xs")),
+        rw!("m-call1-join"; "(MCall1 join ?xs ?s)" => "(Join ?s ?xs)"),
+        rw!("m-call0-join"; "(MCall0 join ?xs)" => "(Join (Str utf16:002c) ?xs)"),
+        rw!("join-nil"; "(Join ?s (Nil))" => "(Str utf16:)"),
+        rw!("join-one"; "(Join ?s (Cons ?h (Nil)))" => "(JoinText ?h)"),
+        rw!("join-cons"; "(Join ?s (Cons ?h (Cons ?g ?t)))" => "(Concat (Concat (JoinText ?h) ?s) (Join ?s (Cons ?g ?t)))"),
+        rw!("join-text"; "(JoinText ?x)" => "?x" if string("?x")),
+        rw!("short-join"; "(Join ?s ?xs)" => { Walk::Join } if not_literal("?xs")),
+        // flat spreads each element one level: a list element is spread, any other is kept.
+        rw!("m-call0-flat"; "(MCall0 flat ?xs)" => "(Flat ?xs)"),
+        rw!("m-call1-flat-map"; "(MCall1 flatMap ?xs ?f)" => "(Flat (Map ?f ?xs))"),
+        rw!("flat-nil"; "(Flat (Nil))" => "(Nil)"),
+        rw!("flat-cons"; "(Flat (Cons ?h ?t))" => "(Append (Spread ?h) (Flat ?t))"),
+        rw!("spread-list"; "(Spread ?x)" => "?x" if list("?x")),
+        rw!("spread-scalar"; "(Spread ?x)" => "(Cons ?x (Nil))" if scalar("?x")),
+        rw!("short-flat"; "(Flat ?xs)" => { Walk::Flat } if not_literal("?xs")),
         rw!("truthy-len"; "(Truthy (Len ?xs))" => "(Lt (Num 0) (Len ?xs))"),
         rw!("truthy-lt"; "(Truthy (Lt ?a ?b))" => "(Lt ?a ?b)"),
         rw!("truthy-le"; "(Truthy (Le ?a ?b))" => "(Le ?a ?b)"),

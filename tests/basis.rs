@@ -116,12 +116,25 @@ fn joint_roots_prove_projection_and_affine_equivalence() {
     assert_eq!(r.roots[5], r.roots[6]);
 }
 #[test]
-fn literal_lists_take_only_the_branch_a_known_index_selects() {
-    // A known index used to build every at-cons branch, seeding dead reads at -1, -2, ...
+fn constant_reads_of_literal_lists_never_reach_bounds_rules() {
+    // The frontend folds a constant index into an array literal.
+    for (src, expected) in [
+        ("[1, 2][0]", "(Num 1)"),
+        ("([1, 2])[1]", "(Num 2)"),
+        ("[1, 2][2] ?? 0", "(Num 0)"),
+        ("[1, ...xs][0]", "(Num 1)"),
+    ] {
+        let r = evaluate(src).unwrap();
+        assert!(r.saturated && r.consistent, "{src}");
+        assert_eq!(r.canonical.to_string(), expected, "{src}");
+        assert!(r.nodes < 8, "{src}: {} nodes", r.nodes);
+    }
+    // A literal reached by rewriting takes only the branch at-cons selects; building every
+    // branch used to seed dead reads at -1, -2, ... down the list.
     for (src, expected, bound) in [
-        ("[1, 2][0]", "(Num 1)", 50),
-        ("[1, 2][1]", "(Num 2)", 50),
-        ("[1, 2][2] ?? 0", "(Num 0)", 50),
+        ("((xs) => xs[0])([1, 2])", "(Num 1)", 70),
+        ("((xs) => xs[1])([1, 2])", "(Num 2)", 70),
+        ("((xs) => xs[2] ?? 0)([1, 2])", "(Num 0)", 80),
         ("[1, 2].reduce((a, b) => a + b, 0)", "(Num 3)", 64),
     ] {
         let r = evaluate(src).unwrap();
