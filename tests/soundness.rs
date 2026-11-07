@@ -227,3 +227,58 @@ fn list_methods_check_their_arguments() {
         value(source, "throw");
     }
 }
+
+#[test]
+fn a_closure_called_in_a_world_sees_its_read_decided() {
+    checked("(xs[i] === undefined ? () => xs[i] ?? 0 : () => 1)()", Verdict::NoCheat);
+    cheat("(xs[i] === undefined ? (() => 0) : (() => xs[i]))()", &[Family::Default]);
+}
+
+#[test]
+fn a_literal_filter_does_not_hide_a_possibly_missing_element() {
+    cheat("[names[i]].filter((n) => n === 'off').length === 0", &[Family::Sink]);
+}
+
+#[test]
+fn drift_survives_short_lists_projections_and_present_branches() {
+    for source in [
+        "users.map((_, i) => roles.slice(i, i + 1)[0])",
+        "users.map((_, i) => roles.filter((_, k) => k === i)[0])",
+        "users.map((_, i) => roles.map((r) => r + 1)[i])",
+        "users.map((_, i) => roles[i] && roles[i] + '!')",
+    ] {
+        cheat(source, &[Family::Drift]);
+    }
+    // A missing read that throws leaves no hole.
+    checked("users.map((_, i) => roles[i].length)", Verdict::NoCheat);
+}
+
+#[test]
+fn what_the_value_does_not_depend_on_is_not_judged() {
+    for source in ["xs.length >= 0 ? 1 : [names[i] ?? 'x']", "xs.length < 0 && [names[i] ?? 'x']", "xs.filter(() => false).map(() => ys[j] ?? 0)"] {
+        checked(source, Verdict::NoCheat);
+    }
+}
+
+#[test]
+fn a_present_branch_that_ignores_the_element_observes() {
+    for source in ["names[i] ? ys.length : ys.length", "names[i] ? n * 2 : n * 2"] {
+        checked(source, Verdict::NoCheat);
+    }
+}
+
+#[test]
+fn reads_a_walker_keeps_in_range_are_present() {
+    for source in [
+        "((m) => m.map((y, k) => m[k] !== 'off'))(names.map((n) => n))",
+        "xs.filter((x) => x !== 'off').map((x, i) => xs[i] !== 'off')",
+        "xs.map((x, i) => [...xs, 0][i])",
+        "xs.map((x, i) => xs.slice(0)[i])",
+        "xs.map((x) => xs[0] ?? 0)",
+        "xs.map((x, i) => xs.at(-1) ?? 0)",
+        "xs.map((x, i) => xs.slice(i, i + 1).every((y) => y > 0))",
+    ] {
+        checked(source, Verdict::NoCheat);
+    }
+    cheat("ys.map((y) => xs[0] ?? 0)", &[Family::Default]);
+}

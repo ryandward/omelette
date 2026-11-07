@@ -37,7 +37,7 @@ fn logic() -> Vec<Rule> {
     ]
 }
 
-/// Lengths of list shapes, and reads of literal lists.
+/// Lengths of list shapes, reads of literal lists, and walkers over the empty list.
 fn lists() -> Vec<Rule> {
     vec![
         rw!("append-nil"; "(append nil ?b)" => "?b"),
@@ -49,6 +49,14 @@ fn lists() -> Vec<Rule> {
         rw!("len-map"; "(len (map ?f ?xs))" => "(len ?xs)"),
         rw!("read"; "(read ?xs ?k)" => Expand),
         rw!("at-head"; "(at (cons ?h ?t) 0)" => "?h"),
+        rw!("map-nil"; "(map ?f nil)" => "nil"),
+        rw!("filter-nil"; "(filter ?f nil)" => "nil"),
+        rw!("filter-false"; "(filter (lam ?x ?i false) ?xs)" => "nil"),
+        rw!("every-nil"; "(every ?f nil)" => "true"),
+        rw!("some-nil"; "(some ?f nil)" => "false"),
+        rw!("fold-nil"; "(fold ?f ?z nil)" => "?z"),
+        rw!("join-nil"; "(join ?s nil)" => "utf16:"),
+        rw!("flat-nil"; "(flat nil)" => "nil"),
     ]
 }
 

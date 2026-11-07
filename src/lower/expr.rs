@@ -240,7 +240,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, &y, &n))
     }
     fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>) -> Val<'a> {
-        if yes.is_known() && super::ops::same(yes, no) == Some(true) {
+        if yes.identical(no) || (yes.is_known() && super::ops::same(yes, no) == Some(true)) {
             return yes.clone();
         }
         let ty = join(yes, no);

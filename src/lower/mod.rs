@@ -99,6 +99,8 @@ pub struct Lowerer<'a, 'l> {
     elems: HashMap<Id, Id>,
     /// Each walker index binder, with the list it ranges over.
     coords: HashMap<Id, Id>,
+    /// The lists whose walkers' callbacks are being lowered: each is non-empty there.
+    walking: Vec<Id>,
     /// Each mapped list, with its callback and the list it maps.
     maps: HashMap<Id, (Val<'a>, value::Seq)>,
     depth: usize,
@@ -116,6 +118,7 @@ impl<'l> Lowerer<'_, 'l> {
             narrow: HashMap::new(),
             elems: HashMap::new(),
             coords: HashMap::new(),
+            walking: Vec::new(),
             maps: HashMap::new(),
             depth: 0,
             opaque: false,

@@ -193,9 +193,14 @@ impl<'a> Lowerer<'a, '_> {
                 let mapped = self.each(items, &f);
                 self.strict(mapped, &mut |_, mapped| Val::List(Rc::new(mapped)))
             }
-            "filter" => self.filter_items(items, &f).unwrap_or_else(|| {
-                let list = self.seq(items);
-                self.term_method(list, name, args)
+            // A walker over the list would hide a possibly missing element from detection,
+            // so the filter runs in every world of the reads among its elements.
+            "filter" => self.decide(items.to_vec(), |v| matches!(v, Val::Split(_)), &mut |l, items| {
+                let items = Rc::new(items);
+                l.filter_items(&items, &f).unwrap_or_else(|| {
+                    let list = l.seq(&items);
+                    l.term_method(list, name, args)
+                })
             }),
             "find" => self.find_items(items, &f),
             "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
@@ -413,7 +418,9 @@ impl<'a> Lowerer<'a, '_> {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
+        self.walking.push(list.id);
         let result = self.apply(f.clone(), args);
+        self.walking.pop();
         let items = Items::of(result.defined());
         let body = if kind == Walker::Map {
             self.escape(&result)
@@ -428,7 +435,7 @@ impl<'a> Lowerer<'a, '_> {
     fn escape(&mut self, v: &Val<'a>) -> Id {
         let id = self.b.emit(v);
         match v {
-            Val::Split(s) if s.drift && s.family == Family::Propagate => self.b.add(Core::Escape(id)),
+            Val::Split(s) if s.drift && matches!(s.absent, Val::Undef) => self.b.add(Core::Escape(id)),
             _ => id,
         }
     }
@@ -518,7 +525,9 @@ impl<'a> Lowerer<'a, '_> {
         let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
+        self.walking.push(list.id);
         let body = self.apply(f.clone(), args);
+        self.walking.pop();
         let body = self.b.emit(&body);
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
         let init = match init {
@@ -550,6 +559,11 @@ impl<'a> Lowerer<'a, '_> {
         let sliced = Seq { id: self.b.add(Core::Slice([list.id, a, z])), items: list.items };
         match tail.or_else(|| end.plus(&start, -1).and_then(|w| w.known())) {
             Some(0) => Val::empty(),
+            // A walker's own index is in range, so the slice holds exactly that element.
+            Some(1) if start.single().is_some() && self.in_range(list.id, &start) => {
+                let element = self.element(list, &start);
+                Val::List(Rc::new(vec![element]))
+            }
             Some(1) => self.short(sliced, drift),
             _ => sliced.val(),
         }

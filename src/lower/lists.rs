@@ -41,19 +41,51 @@ impl<'a> Lowerer<'a, '_> {
             _ => self.unsupported(),
         }
     }
-    /// A read of a symbolic list: proven when the index is a walker's own coordinate on its
-    /// own receiver, and otherwise split, marked as drift if the index came from a walker.
+    /// A read of a symbolic list: proven in range at a walker's index over a list no longer
+    /// than this one, or at either end while a walker over such a list runs, since its
+    /// callback runs only on a non-empty list. Otherwise split, and marked as drift if the
+    /// index came from a walker.
     pub fn element(&mut self, list: Seq, index: &Form) -> Val<'a> {
         if let Some((f, base)) = self.maps.get(&list.id).cloned() {
             return self.mapped(&f, base, list, index);
         }
         let idx = self.b.form(index);
-        if index.single().is_some_and(|i| self.coords.get(&i) == Some(&list.id)) {
+        if self.in_range(list.id, index) {
             return Val::Term(self.b.add(Core::At([list.id, idx])), list.items.ty());
         }
         let read = self.b.add(Core::Read([list.id, idx]));
         let drift = index.terms.keys().any(|a| self.coords.contains_key(a));
         self.split_read(read, drift, list.items)
+    }
+    /// Whether `list[index]` is proven in range by the walkers around it.
+    pub fn in_range(&mut self, list: Id, index: &Form) -> bool {
+        if index.single().and_then(|i| self.coords.get(&i).copied()).is_some_and(|l| self.no_longer(l, list)) {
+            return true;
+        }
+        let len = Form::atom(self.b.add(Core::Len(list)));
+        let end = index.known() == Some(0) || len.plus(&Form::constant(1), -1).as_ref() == Some(index);
+        end && self.walking.clone().into_iter().any(|l| self.no_longer(l, list))
+    }
+    /// Whether `inner` provably has no more elements than `outer`: a map keeps its list's
+    /// length, a filter or slice keeps at most it, and an append or a full copy at least it.
+    fn no_longer(&self, inner: Id, outer: Id) -> bool {
+        if inner == outer {
+            return true;
+        }
+        if let Core::Map([_, l]) | Core::Filter([_, l]) | Core::Slice([l, _, _]) = self.b.node(inner)
+            && self.no_longer(*l, outer)
+        {
+            return true;
+        }
+        match self.b.node(outer) {
+            Core::Map([_, l]) => self.no_longer(inner, *l),
+            Core::Append([a, b]) => self.no_longer(inner, *a) || self.no_longer(inner, *b),
+            Core::Slice([l, a, z]) => {
+                let copy = matches!(self.b.node(*a), Core::Int(0)) && matches!(self.b.node(*z), Core::Len(m) if m == l);
+                copy && self.no_longer(inner, *l)
+            }
+            _ => false,
+        }
     }
     /// An element of `base.map(f)`: `f` applied to the element of `base` where present.
     fn mapped(&mut self, f: &Val<'a>, base: Seq, list: Seq, index: &Form) -> Val<'a> {

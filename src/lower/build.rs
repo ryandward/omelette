@@ -67,6 +67,9 @@ impl Builder {
         let sum = self.form(form);
         Val::Term(self.add(Core::Le([zero, sum])), super::value::Ty::Bool)
     }
+    pub fn node(&self, id: Id) -> &Core {
+        &self.out[id]
+    }
     /// Whether the term `id` mentions the term `var`.
     pub fn mentions(&self, id: Id, var: Id) -> bool {
         id == var || self.out[id].children().iter().any(|&c| self.mentions(c, var))

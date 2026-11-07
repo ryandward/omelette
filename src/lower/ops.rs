@@ -27,7 +27,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     /// Rebuild a split from new sides, composing `family` into the split's flow if this
     /// operation changed the absent side.
     pub fn resplit(&mut self, s: &Split<'a>, absent: Val<'a>, present: Val<'a>, family: Family) -> Val<'a> {
-        if absent.is_known() && present.is_known() && same(&absent, &present) == Some(true) {
+        // Both worlds give one value: it does not depend on the read.
+        if absent.identical(&present) || (absent.is_known() && present.is_known() && same(&absent, &present) == Some(true)) {
             return absent;
         }
         let family = match &absent {
@@ -49,7 +50,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         let kept = self.assume(s.present.clone(), read, present);
         self.resplit(&s, absent, kept, s.family)
     }
-    /// Apply `op` on every pair of sides of the splits in `a` and `b`.
+    /// Apply `op` on every pair of sides of the splits in `a` and `b`, each in its world: the
+    /// split's read narrowed, so a function called there sees the read decided.
     pub fn lift2(&mut self, a: Val<'a>, b: Val<'a>, family: Family, op: &mut Op<'a, 'l, '_>) -> Val<'a> {
         let (s, flipped) = match (&a, &b) {
             (Val::Split(s), _) => (s.clone(), false),
@@ -58,8 +60,11 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         };
         let other = if flipped { a } else { b };
         let mut side = |l: &mut Self, mine: Val<'a>, present: bool| {
-            let other = l.assume(other.clone(), s.read, present);
-            if flipped { l.lift2(other, mine, family, op) } else { l.lift2(mine, other, family, op) }
+            let world = if present { Val::Term(s.elem, s.items.ty()) } else { Val::Undef };
+            l.within(s.read, world, |l| {
+                let other = l.assume(other.clone(), s.read, present);
+                if flipped { l.lift2(other, mine, family, op) } else { l.lift2(mine, other, family, op) }
+            })
         };
         let absent = side(self, s.absent.clone(), false);
         let present = side(self, s.present.clone(), true);
@@ -71,19 +76,23 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     /// Continue with `vals` once they are evaluated: a world in which one of them throws
     /// throws, and `then` runs in every other world with the values narrowed to it.
     pub fn strict(&mut self, vals: Vec<Val<'a>>, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
-        if vals.iter().any(|v| matches!(v, Val::Throw)) {
-            return Val::Throw;
-        }
-        let throwing = vals.iter().find_map(|v| match v {
-            Val::Split(s) if v.may_throw() => Some(s.clone()),
+        self.decide(vals, Val::may_throw, &mut |l, vals| {
+            if vals.iter().any(|v| matches!(v, Val::Throw)) { Val::Throw } else { then(l, vals) }
+        })
+    }
+    /// Run `then` on `vals` in every world of the splits `pick` selects among them, with
+    /// every value narrowed to that world.
+    pub fn decide(&mut self, vals: Vec<Val<'a>>, pick: fn(&Val<'a>) -> bool, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
+        let chosen = vals.iter().find_map(|v| match v {
+            Val::Split(s) if pick(v) => Some(s.clone()),
             _ => None,
         });
-        let Some(s) = throwing else { return then(self, vals) };
+        let Some(s) = chosen else { return then(self, vals) };
         let mut side = |l: &mut Self, present: bool| {
             let world = if present { Val::Term(s.elem, s.items.ty()) } else { Val::Undef };
             l.within(s.read, world, |l| {
                 let narrowed = vals.iter().map(|v| l.assume(v.clone(), s.read, present)).collect();
-                l.strict(narrowed, then)
+                l.decide(narrowed, pick, then)
             })
         };
         let absent = side(self, false);
