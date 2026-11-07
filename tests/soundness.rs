@@ -299,3 +299,92 @@ fn a_witness_over_an_element_that_may_be_undefined_is_undecided() {
         checked(source, Verdict::Undecided);
     }
 }
+
+#[test]
+fn a_branch_decides_a_read_held_in_a_binding() {
+    cheat("(() => { const n = names[i]; if (n === undefined) return 'none'; return n; })()", &[Family::Default]);
+    cheat("((v) => v === undefined ? 0 : v)(xs[i])", &[Family::Default]);
+    checked("(() => { const n = names[i]; if (n === undefined) return undefined; return n + '!'; })()", Verdict::NoCheat);
+}
+
+#[test]
+fn a_swallow_inside_a_call_or_filter_keeps_its_flow() {
+    cheat("[names[i]].filter((n) => n === 'on').length", &[Family::Sink]);
+    cheat("((v) => v ?? 0)(xs[i] === undefined ? undefined : xs[i] + ys[j].length)", &[Family::Default]);
+}
+
+#[test]
+fn an_argument_that_may_be_missing_is_split_before_a_method_uses_it() {
+    cheat("[1, 2].join(names[i])", &[Family::Sink]);
+    checked("xs.reduce((a, b) => a ?? b, ys[j])", Verdict::Undecided);
+}
+
+#[test]
+fn another_read_of_the_same_list_may_be_the_element() {
+    for source in ["xs[i] === undefined ? 0 : xs.slice(i, i + 1)[0]", "xs[i] === undefined ? 0 : [...xs, 1][i]", "xs.slice(i, i + 1).every(() => xs[0] !== 'a')"] {
+        checked(source, Verdict::Undecided);
+    }
+}
+
+#[test]
+fn presence_comes_from_the_read_not_its_value() {
+    let r = checked("[true, [undefined, ...ys][0], ys[-1] === undefined ? 1 : 2]", Verdict::NoCheat);
+    assert_eq!(r.canonical.to_string(), "(cons true (cons undefined (cons 1 nil)))");
+    cheat("[true, [undefined, ...ys][0], ys[-1] === undefined ? zs[j] ?? 0 : 2]", &[Family::Default]);
+}
+
+#[test]
+fn only_what_the_value_needs_is_judged() {
+    for source in ["users.map((u) => names[j] ?? 'x').length", "users.map((_, i) => roles[i]).length", "xs[-1] !== undefined ? (ys[j] ?? 0) : x"] {
+        checked(source, Verdict::NoCheat);
+    }
+    value("[1, ...xs][0] ?? (ys[j] ?? 0)", "1");
+}
+
+#[test]
+fn a_branch_that_throws_or_skips_the_read_swallows_nothing() {
+    for source in ["(i > 0 ? ys[j].length : 0) + 1", "!(i > 0 && ys[j].length)"] {
+        checked(source, Verdict::Undecided);
+    }
+    checked("i > 0 ? xs[j] : 0", Verdict::NoCheat);
+    cheat("(i > 0 ? xs[j] : 0) ?? 5", &[Family::Default]);
+    cheat("xs.length ? xs[xs.length - 1] : 0", &[Family::Default]);
+}
+
+#[test]
+fn a_callback_run_outside_its_walker_still_runs_on_a_non_empty_list() {
+    checked("xs.map(() => xs[0] ?? 5)[j]", Verdict::NoCheat);
+    checked("[undefined, ...xs].slice(i, i + 1).map((x, k, a) => a[0] ?? 5)[0]", Verdict::NoCheat);
+}
+
+#[test]
+fn distinct_lists_are_distinct_objects() {
+    checked("((a, b) => (xs[i] === undefined ? a : b) === a)([1], [1])", Verdict::NoCheat);
+    let r = checked("((s) => [...s] === s)(xs.slice(i, i + 1))", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "true");
+}
+
+#[test]
+fn what_certainly_throws_throws() {
+    for source in ["[undefined(), xs[i] ?? 0]", "[undefined.foo, xs[i] ?? 0]", "['a'(), xs[i] ?? 0]"] {
+        value(source, "throw");
+    }
+}
+
+#[test]
+fn a_projection_keeps_its_own_slot() {
+    checked("xs.map((_, k) => xs.map(() => ys[j]).filter((_, m) => m === k).reduce((a, y) => y, 'z'))", Verdict::NoCheat);
+}
+
+#[test]
+fn a_mapped_read_passes_the_base_array() {
+    let r = checked("xs.map((x, k, a) => a.join(''))[j]", Verdict::NoCheat);
+    assert!(r.canonical.to_string().contains("(join utf16: list:xs)"), "{}", r.canonical);
+}
+
+#[test]
+fn many_throwing_elements_lower_in_linear_time() {
+    let items: Vec<String> = (1..=24).map(|k| format!("x{k}[i].length")).collect();
+    let r = omelette::engine::evaluate(&format!("[{}, 0]", items.join(", "))).unwrap();
+    assert!(r.parse_time.as_millis() < 50, "{:?}", r.parse_time);
+}

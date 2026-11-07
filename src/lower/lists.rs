@@ -23,7 +23,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef | Val::Throw => Val::Throw,
             Val::List(items) => {
                 if let Some(k) = f.known() {
-                    return usize::try_from(k).ok().and_then(|k| items.get(k).cloned()).unwrap_or(Val::Undef);
+                    let item = usize::try_from(k).ok().and_then(|k| items.get(k).cloned());
+                    return item.map_or(Val::Undef, |v| self.settle(v));
                 }
                 let list = self.seq(&items);
                 self.element(list, f)
@@ -47,7 +48,7 @@ impl<'a> Lowerer<'a, '_> {
     /// index came from a walker.
     pub fn element(&mut self, list: Seq, index: &Form) -> Val<'a> {
         if let Some((f, base)) = self.maps.get(&list.id).cloned() {
-            return self.mapped(&f, base, list, index);
+            return self.mapped(&f, base, index);
         }
         let idx = self.b.form(index);
         if self.in_range(list.id, index) {
@@ -87,14 +88,27 @@ impl<'a> Lowerer<'a, '_> {
             _ => false,
         }
     }
-    /// An element of `base.map(f)`: `f` applied to the element of `base` where present.
-    fn mapped(&mut self, f: &Val<'a>, base: Seq, list: Seq, index: &Form) -> Val<'a> {
+    /// An element of `base.map(f)`: `f` applied to the element of `base` where present, as
+    /// map calls it: with the element, its index, and `base`, which is non-empty there.
+    fn mapped(&mut self, f: &Val<'a>, base: Seq, index: &Form) -> Val<'a> {
         let slot = self.element(base, index);
         let (f, index) = (f.clone(), index.clone());
         self.worlds(slot, Family::Propagate, &mut |l, x| match x {
             Val::Undef => Val::Undef,
-            x => l.apply(f.clone(), vec![x, Val::Num(index.clone()), list.val()]),
+            x => {
+                l.walking.push(base.id);
+                let out = l.apply(f.clone(), vec![x, Val::Num(index.clone()), base.val()]);
+                l.walking.pop();
+                out
+            }
         })
+    }
+    /// The list a chain of maps starts from.
+    pub fn base_of(&self, mut list: Seq) -> Seq {
+        while let Some((_, base)) = self.maps.get(&list.id) {
+            list = *base;
+        }
+        list
     }
     pub fn split_read(&mut self, read: Id, drift: bool, items: Items) -> Val<'a> {
         if let Some(v) = self.narrow.get(&read) {
@@ -141,11 +155,14 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// `object.name`: reading any property of undefined throws; of the rest only `length`
+    /// is modeled.
     pub fn property(&mut self, object: Val<'a>, name: &str) -> Val<'a> {
-        if name != "length" {
-            return self.unsupported();
-        }
-        self.lift(object, Family::Propagate, &mut |l, v| l.length(v))
+        self.lift(object, Family::Propagate, &mut |l, v| match v {
+            Val::Undef | Val::Throw => Val::Throw,
+            v if name == "length" => l.length(v),
+            _ => l.unsupported(),
+        })
     }
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and
     /// possibly undefined for a value of unknown type.
@@ -205,11 +222,11 @@ impl<'a> Lowerer<'a, '_> {
         match v {
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             Val::Str(s) => Val::List(Rc::new(code_points(&s.units()).into_iter().map(Val::Str).collect())),
-            Val::Term(_, Ty::Str) => self.dynamic("spread", &[&v], Ty::List(Items::Defined)),
+            Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::Defined)),
             Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Term(_, Ty::Bool) => Val::Throw,
             Val::Term(_, Ty::Defined | Ty::Any) | Val::Split(_) => {
                 self.opaque = true;
-                self.dynamic("spread", &[&v], Ty::List(Items::Any))
+                self.dynamic("iterate", &[&v], Ty::List(Items::Any))
             }
         }
     }

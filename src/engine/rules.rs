@@ -47,6 +47,7 @@ fn lists() -> Vec<Rule> {
         rw!("len-cons"; "(len (cons ?h ?t))" => { Sum(&["1", "?t"]) }),
         rw!("len-append"; "(len (append ?a ?b))" => { Sum(&["?a", "?b"]) }),
         rw!("len-map"; "(len (map ?f ?xs))" => "(len ?xs)"),
+        rw!("len-if"; "(len (if ?c ?a ?b))" => "(if ?c (len ?a) (len ?b))"),
         rw!("read"; "(read ?xs ?k)" => "(if (has ?xs ?k) (at ?xs ?k) undefined)"),
         rw!("has"; "(has ?xs ?k)" => Range),
         rw!("at-head"; "(at (cons ?h ?t) 0)" => "?h"),
@@ -71,6 +72,9 @@ fn witnesses() -> Vec<Rule> {
         rw!("maybe-read"; "(maybe ?fam ?z (lam ?e ?e) ?r ?h)" => "?r" if decided("?h", true)),
         rw!("maybe-value"; "(maybe ?fam ?z ?f ?r ?h)" => "(elim ?z ?f ?r ?h)"),
         rw!("presence-absent"; "(maybe ?fam (if ?h ?a ?b) ?f ?r ?h)" => "(maybe ?fam ?b ?f ?r ?h)"),
+        // A conditional on the read's own presence that picks a value where it is missing
+        // writes a default, whatever flow the arms carried.
+        rw!("presence-default"; "(maybe propagate (if ?h ?a ?b) ?f ?r ?h)" => "(maybe default ?b ?f ?r ?h)" if defined("?b")),
         rw!("presence-present"; "(maybe ?fam ?z (lam ?e (if ?h ?a ?b)) ?r ?h)" => "(maybe ?fam ?z (lam ?e ?a) ?r ?h)"),
     ]
 }
@@ -199,6 +203,12 @@ fn identity(g: &mut Graph) -> Id {
 fn decided(h: &str, value: bool) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
     let h = var(h);
     move |g, _, s| g[s[h]].data.constant == Some(Const::Bool(value))
+}
+
+/// The class `b` is not the constant undefined.
+fn defined(b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let b = var(b);
+    move |g, _, s| g[s[b]].data.constant != Some(Const::Undef)
 }
 
 /// The class `b` has a known constant.

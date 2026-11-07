@@ -68,7 +68,10 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn ident(&mut self, id: &IdentifierReference<'_>) -> Val<'a> {
         match self.scoping.get_reference(id.reference_id()).symbol_id() {
-            Some(symbol) => self.env.get(&symbol).cloned().unwrap_or_else(|| self.unsupported()),
+            Some(symbol) => match self.env.get(&symbol).cloned() {
+                Some(v) => self.settle(v),
+                None => self.unsupported(),
+            },
             None => self.free(id.name.as_str()),
         }
     }
@@ -240,7 +243,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         if let Val::Bool(b) = test {
             return if *b { yes } else { no };
         }
-        self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, &y, &n))
+        // Choosing between arms swallows nothing: a split in an arm keeps its own flow.
+        self.lift2(yes, no, Family::Propagate, &mut |l, y, n| l.choose(test, &y, &n))
     }
     fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>) -> Val<'a> {
         if yes.identical(no) || (yes.is_known() && super::ops::same(yes, no) == Some(true)) {

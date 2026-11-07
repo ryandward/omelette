@@ -33,22 +33,25 @@ impl<'a> Lowerer<'a, '_> {
         let callee = self.expr(&c.callee);
         self.apply(callee, args)
     }
-    /// Call a value once it and its arguments are evaluated: inline a known function, or
-    /// leave an opaque call.
+    /// Call a value once it and its arguments are evaluated.
     pub fn apply(&mut self, callee: Val<'a>, args: Vec<Val<'a>>) -> Val<'a> {
         if callee.may_throw() || args.iter().any(Val::may_throw) {
             let values = std::iter::once(callee).chain(args).collect();
             return self.strict(values, &mut |l, mut values| {
                 let callee = values.remove(0);
-                l.apply(callee, values)
+                l.invoke(callee, values)
             });
+        }
+        self.invoke(callee, args)
+    }
+    /// Inline a known function, throw for a value that is not one, or leave an opaque call.
+    fn invoke(&mut self, callee: Val<'a>, args: Vec<Val<'a>>) -> Val<'a> {
+        if not_callable(&callee) || matches!(callee, Val::Throw) {
+            return Val::Throw;
         }
         match callee {
             Val::Fun(f) if self.depth < INLINE_DEPTH => self.inline(&f, args),
-            Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| match f {
-                Val::Undef => Val::Throw,
-                f => l.apply(f, args.clone()),
-            }),
+            Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| l.invoke(f, args.clone())),
             callee => {
                 self.opaque = true;
                 let mut children = vec![self.b.emit(&callee)];
@@ -197,15 +200,7 @@ impl<'a> Lowerer<'a, '_> {
                 let mapped = self.each(items, &f);
                 self.strict(mapped, &mut |_, mapped| Val::List(Rc::new(mapped)))
             }
-            // A walker over the list would hide a possibly missing element from detection,
-            // so the filter runs in every world of the reads among its elements.
-            "filter" => self.decide(items.to_vec(), |v| matches!(v, Val::Split(_)), &mut |l, items| {
-                let items = Rc::new(items);
-                l.filter_items(&items, &f).unwrap_or_else(|| {
-                    let list = l.seq(&items);
-                    l.term_method(list, name, args)
-                })
-            }),
+            "filter" => self.filter_items(items, &f),
             "find" => self.find_items(items, &f),
             "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
             "at" => self.at_items(items, &f),
@@ -261,10 +256,16 @@ impl<'a> Lowerer<'a, '_> {
             v => l.to_text(v),
         })
     }
+    /// The separator `join` writes: a comma where the argument is undefined, which writes a
+    /// default for a separator that may be missing.
     fn separator(&mut self, sep: Option<Val<'a>>) -> Val<'a> {
+        let comma = Val::Str(crate::core::Utf16::new(",".encode_utf16()));
         match sep {
-            None | Some(Val::Undef) => Val::Str(crate::core::Utf16::new(",".encode_utf16())),
-            Some(v) => self.to_text(v),
+            None => comma,
+            Some(v) => self.lift(v, Family::Default, &mut |l, v| match v {
+                Val::Undef => comma.clone(),
+                v => l.to_text(v),
+            }),
         }
     }
     pub fn join_items(&mut self, items: &Rc<Vec<Val<'a>>>, sep: Option<Val<'a>>) -> Val<'a> {
@@ -332,16 +333,33 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     fn over_slot(&mut self, s: &Short<'a>, family: Family, unit: &Val<'a>, present: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
         let slot = self.split_read(s.read, s.drift, s.items);
         let (elem, keep) = (s.elem.clone(), s.keep.clone());
+        let read_list = self.slot_list(s);
         self.worlds(slot, family, &mut |l, v| {
             if matches!(v, Val::Undef) {
                 return unit.clone();
             }
+            l.walking.push(read_list);
             let value = present(l, elem.clone());
+            l.walking.pop();
             l.select(&keep, value, unit.clone())
         })
     }
+    /// The list the slot reads, which is non-empty where the slot is present.
+    fn slot_list(&self, s: &Short<'a>) -> Id {
+        match self.b.node(s.read) {
+            Core::Read([list, _]) => *list,
+            _ => s.list.id,
+        }
+    }
+    /// A walker over the short list: its callback runs only where the slot is present.
     fn short_walk(&mut self, s: &Rc<Short<'a>>, name: &str, f: &Val<'a>) -> Val<'a> {
-        let applied = self.apply(f.clone(), vec![s.elem.clone(), Val::int(0), Val::Short(s.clone())]);
+        let (world, read_list) = (Val::Term(s.var, s.items.ty()), self.slot_list(s));
+        let applied = self.within(s.read, world, |l| {
+            l.walking.push(read_list);
+            let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), Val::Short(s.clone())]);
+            l.walking.pop();
+            out
+        });
         let kind = if name == "filter" { Walker::Filter } else { Walker::Map };
         let list = self.walker(kind, f, s.list);
         let mut next = Short { list, ..(**s).clone() };
@@ -452,8 +470,16 @@ impl<'a> Lowerer<'a, '_> {
     fn filter(&mut self, list: Seq, f: &Val<'a>) -> Val<'a> {
         if let Some((index, lam)) = self.projection(f, list) {
             let walked = Seq { id: self.b.add(Core::Filter([lam, list.id])), items: list.items };
+            let base = self.base_of(list);
+            // A present element is all the filter keeps.
+            if self.in_range(base.id, &index) {
+                let element = self.element(list, &index);
+                return Val::List(Rc::new(vec![element]));
+            }
+            let idx = self.b.form(&index);
+            let slot = self.b.add(Core::Read([base.id, idx]));
             let read = self.element(list, &index);
-            return projected(walked, &read);
+            return projected(walked, slot, &read);
         }
         self.walker(Walker::Filter, f, list).val()
     }
@@ -528,7 +554,12 @@ impl<'a> Lowerer<'a, '_> {
         }
         body
     }
+    /// A fold over a symbolic list. A seed that may be missing flows into the accumulator,
+    /// where the callback may swallow it or not, so its flow is undecided.
     fn fold(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+        if let Some(seed @ Val::Split(_)) = init {
+            return self.lift(seed, Family::Undecided, &mut |l, z| l.fold(list, f, Some(z)));
+        }
         let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), list.val()];
@@ -611,10 +642,14 @@ fn not_callable(v: &Val<'_>) -> bool {
         || matches!(v, Val::Term(_, Ty::Bool | Ty::Str | Ty::List(_)))
 }
 
-/// A filtered list holding at most the element read by `slot`, with that element's value
-/// where present (a mapped list's mapped value), and the slot's drift.
-fn projected<'a>(list: Seq, slot: &Val<'a>) -> Val<'a> {
-    let Val::Split(s) = slot else { return list.val() };
+/// A filtered list holding at most the element `slot` reads, with that element's value where
+/// present (a mapped list's mapped value) and the read's drift. When the value is not a split
+/// on that read, its presence is not tracked, and the filter stays a term.
+fn projected<'a>(list: Seq, slot: Id, value: &Val<'a>) -> Val<'a> {
+    let Val::Split(s) = value else { return list.val() };
+    if s.read != slot {
+        return list.val();
+    }
     let short = Short {
         list,
         read: s.read,
@@ -628,19 +663,22 @@ fn projected<'a>(list: Seq, slot: &Val<'a>) -> Val<'a> {
 }
 
 impl<'a> Lowerer<'a, '_> {
-    /// The kept elements, when every keep decision is known.
-    fn filter_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Option<Val<'a>> {
-        let decisions = self.each(items, f);
-        let mut kept = Vec::new();
-        for (item, decision) in items.iter().zip(decisions) {
-            match self.truthy_split(decision) {
-                Val::Bool(true) => kept.push(item.clone()),
-                Val::Bool(false) => {}
-                Val::Throw => return Some(Val::Throw),
-                _ => return None,
-            }
-        }
-        Some(Val::List(Rc::new(kept)))
+    /// The kept elements: each element's keep decides, in every world of its splits,
+    /// whether the element is appended, and a symbolic keep appends it conditionally.
+    fn filter_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Val<'a> {
+        let keeps = self.each(items, f);
+        items.iter().zip(keeps).fold(Val::empty(), |acc, (item, keep)| {
+            let keep = self.truthy_split(keep);
+            self.lift2(acc, keep, Family::Propagate, &mut |l, acc, keep| match keep {
+                Val::Bool(false) => acc,
+                Val::Throw => Val::Throw,
+                keep => {
+                    let item = l.settle(item.clone());
+                    let kept = l.append(acc.clone(), Val::List(Rc::new(vec![item])));
+                    l.select(&keep, kept, acc)
+                }
+            })
+        })
     }
     /// The first element the callback accepts, or undefined.
     fn find_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Val<'a> {

@@ -73,31 +73,32 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     pub fn lift(&mut self, v: Val<'a>, family: Family, op: &mut Op1<'a, 'l, '_>) -> Val<'a> {
         self.lift2(v, Val::Undef, family, &mut |l, v, _| op(l, v))
     }
-    /// Continue with `vals` once they are evaluated: a world in which one of them throws
-    /// throws, and `then` runs in every other world with the values narrowed to it.
+    /// Continue with `vals` once they are evaluated: `then` runs on them as they are, and
+    /// every world in which one of them throws then throws.
     pub fn strict(&mut self, vals: Vec<Val<'a>>, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
-        self.decide(vals, Val::may_throw, &mut |l, vals| {
-            if vals.iter().any(|v| matches!(v, Val::Throw)) { Val::Throw } else { then(l, vals) }
+        if vals.iter().any(|v| matches!(v, Val::Throw)) {
+            return Val::Throw;
+        }
+        let throwing: Vec<Val<'a>> = vals.iter().filter(|v| v.may_throw()).cloned().collect();
+        let out = then(self, vals);
+        throwing.into_iter().fold(out, |out, mask| {
+            self.lift2(out, mask, Family::Propagate, &mut |_, out, mask| if matches!(mask, Val::Throw) { Val::Throw } else { out })
         })
     }
-    /// Run `then` on `vals` in every world of the splits `pick` selects among them, with
-    /// every value narrowed to that world.
-    pub fn decide(&mut self, vals: Vec<Val<'a>>, pick: fn(&Val<'a>) -> bool, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
-        let chosen = vals.iter().find_map(|v| match v {
-            Val::Split(s) if pick(v) => Some(s.clone()),
-            _ => None,
-        });
-        let Some(s) = chosen else { return then(self, vals) };
-        let mut side = |l: &mut Self, present: bool| {
-            let world = if present { Val::Term(s.elem, s.items.ty()) } else { Val::Undef };
-            l.within(s.read, world, |l| {
-                let narrowed = vals.iter().map(|v| l.assume(v.clone(), s.read, present)).collect();
-                l.decide(narrowed, pick, then)
-            })
-        };
-        let absent = side(self, false);
-        let present = side(self, true);
-        self.resplit(&s, absent, present, Family::Propagate)
+    /// A value under the current narrowing: each split on a read a branch decided resolves
+    /// to that side, as a read lowered there would.
+    pub fn settle(&mut self, v: Val<'a>) -> Val<'a> {
+        let Val::Split(s) = v else { return v };
+        if let Some(present) = self.narrow.get(&s.read).map(|n| !matches!(n, Val::Undef)) {
+            let side = if present { s.present.clone() } else { s.absent.clone() };
+            return self.settle(side);
+        }
+        let (absent, present) = (self.settle(s.absent.clone()), self.settle(s.present.clone()));
+        if absent.identical(&s.absent) && present.identical(&s.present) {
+            Val::Split(s)
+        } else {
+            self.resplit(&s, absent, present, s.family)
+        }
     }
 }
 
@@ -313,7 +314,6 @@ fn numeric_typed(v: &Val<'_>) -> bool {
 fn identical_object(a: &Val<'_>, b: &Val<'_>) -> Option<bool> {
     match (a, b) {
         (Val::List(x), Val::List(y)) => Some(Rc::ptr_eq(x, y)),
-        (Val::Short(x), Val::Short(y)) => Some(Rc::ptr_eq(x, y)),
         (Val::Fun(x), Val::Fun(y)) => Some(Rc::ptr_eq(x, y)),
         _ => None,
     }

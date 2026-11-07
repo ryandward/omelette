@@ -139,14 +139,14 @@ impl Val<'_> {
         Self::List(Rc::new(Vec::new()))
     }
     /// The same lowered value: structural identity, not JavaScript equality, so `NaN` is
-    /// identical to itself and two lists are identical when their items are.
+    /// identical to itself; a list is an object, identical only to itself.
     pub fn identical(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Undef, Self::Undef) | (Self::NaN, Self::NaN) | (Self::Throw, Self::Throw) => true,
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Num(a), Self::Num(b)) => a == b,
             (Self::Str(a), Self::Str(b)) => a == b,
-            (Self::List(a), Self::List(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.identical(y)),
+            (Self::List(a), Self::List(b)) => Rc::ptr_eq(a, b),
             (Self::Short(a), Self::Short(b)) => Rc::ptr_eq(a, b),
             (Self::Fun(a), Self::Fun(b)) => Rc::ptr_eq(a, b),
             (Self::Split(a), Self::Split(b)) => Rc::ptr_eq(a, b),
