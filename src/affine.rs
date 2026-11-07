@@ -1,67 +1,53 @@
-//! Canonical integer affine terms. No associativity or commutativity rewrites.
-use egg::{Id, SymbolLang};
+//! Integer affine sums: a constant plus integer multiples of atoms, with checked arithmetic.
+use egg::Id;
 use std::collections::BTreeMap;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Form {
     pub constant: i64,
     pub terms: BTreeMap<Id, i64>,
 }
+
 impl Form {
-    pub fn atom(id: Id) -> Self {
+    pub fn constant(constant: i64) -> Self {
         Self {
-            constant: 0,
-            terms: [(id, 1)].into(),
-        }
-    }
-    pub fn constant(n: i64) -> Self {
-        Self {
-            constant: n,
+            constant,
             terms: BTreeMap::new(),
         }
     }
-    pub fn plus(&self, b: &Self, sign: i64) -> Option<Self> {
+    pub fn atom(id: Id) -> Self {
+        Self {
+            constant: 0,
+            terms: BTreeMap::from([(id, 1)]),
+        }
+    }
+    /// The value, when the form has no atoms.
+    pub fn known(&self) -> Option<i64> {
+        self.terms.is_empty().then_some(self.constant)
+    }
+    /// The atom itself, when the form is exactly one atom.
+    pub fn single(&self) -> Option<Id> {
+        let mut terms = self.terms.iter();
+        match (self.constant, terms.next(), terms.next()) {
+            (0, Some((&id, 1)), None) => Some(id),
+            _ => None,
+        }
+    }
+    /// `self + sign * other`, or None on overflow.
+    pub fn plus(&self, other: &Self, sign: i64) -> Option<Self> {
         let mut out = self.clone();
-        out.constant = out.constant.checked_add(b.constant.checked_mul(sign)?)?;
-        for (&id, &n) in &b.terms {
-            let n = out
-                .terms
-                .get(&id)
-                .copied()
-                .unwrap_or(0)
-                .checked_add(n.checked_mul(sign)?)?;
-            if n == 0 {
+        out.constant = out.constant.checked_add(other.constant.checked_mul(sign)?)?;
+        for (&id, &c) in &other.terms {
+            let sum = out.terms.get(&id).copied().unwrap_or(0).checked_add(c.checked_mul(sign)?)?;
+            if sum == 0 {
                 out.terms.remove(&id);
             } else {
-                out.terms.insert(id, n);
+                out.terms.insert(id, sum);
             }
         }
         Some(out)
     }
-    pub fn decode(n: &SymbolLang) -> Option<Self> {
-        let mut parts = n.op.as_str().strip_prefix("Lin:")?.split(':');
-        let constant = parts.next()?.parse().ok()?;
-        let mut out = Self::constant(constant);
-        for &id in &n.children {
-            let coefficient = parts.next()?.parse().ok()?;
-            // Rebuild can merge distinct atoms; sum their coefficients, never overwrite them.
-            out = out.plus(
-                &Self {
-                    constant: 0,
-                    terms: [(id, coefficient)].into(),
-                },
-                1,
-            )?;
-        }
-        if parts.next().is_some() {
-            return None;
-        }
-        Some(out)
-    }
-    pub fn node(&self) -> SymbolLang {
-        let mut op = format!("Lin:{}", self.constant);
-        for n in self.terms.values() {
-            op.push_str(&format!(":{n}"));
-        }
-        SymbolLang::new(op, self.terms.keys().copied().collect::<Vec<_>>())
+    pub fn scale(&self, k: i64) -> Option<Self> {
+        Self::default().plus(self, k)
     }
 }

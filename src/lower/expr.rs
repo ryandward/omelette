@@ -1,0 +1,272 @@
+//! Expressions: symbols, operators, branches, and literals.
+use super::Lowerer;
+use super::ops::Bin;
+use super::value::{Body, Fun, Ty, Val};
+use crate::affine::Form;
+use crate::core::{Core, Family, Kind, Utf16};
+use egg::Id;
+use oxc_ast::ast::{
+    ArrayExpression, ArrayExpressionElement, BinaryExpression, ConditionalExpression, Expression,
+    IdentifierReference, LogicalExpression, Statement, TemplateLiteral, UnaryExpression,
+};
+use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
+use std::rc::Rc;
+
+/// A branch to lower once per world: an expression, the statements left to run, or a
+/// lowered value.
+#[derive(Clone, Copy)]
+pub enum Arm<'a, 'v> {
+    Expr(&'a Expression<'a>),
+    Run(&'v [&'a Statement<'a>]),
+    Val(&'v Val<'a>),
+}
+
+impl<'a> Lowerer<'a, '_> {
+    pub fn expr(&mut self, e: &'a Expression<'a>) -> Val<'a> {
+        match e {
+            Expression::ParenthesizedExpression(p) => self.expr(&p.expression),
+            Expression::TSAsExpression(t) => self.expr(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.expr(&t.expression),
+            Expression::TSNonNullExpression(t) => self.expr(&t.expression),
+            Expression::NumericLiteral(n) => integer(n.value).map_or_else(|| self.unsupported(), Val::int),
+            Expression::StringLiteral(s) => Val::Str(Utf16::new(s.value.encode_utf16())),
+            Expression::BooleanLiteral(b) => Val::Bool(b.value),
+            Expression::TemplateLiteral(t) => self.template(t),
+            Expression::Identifier(id) => self.ident(id),
+            Expression::UnaryExpression(u) => self.unary(u),
+            Expression::BinaryExpression(b) => self.binop(b),
+            Expression::LogicalExpression(l) => self.logical(l),
+            Expression::ConditionalExpression(c) => self.conditional(c),
+            Expression::ArrayExpression(a) => self.array(a),
+            Expression::StaticMemberExpression(m) if !m.optional => {
+                let object = self.expr(&m.object);
+                self.property(object, m.property.name.as_str())
+            }
+            Expression::ComputedMemberExpression(m) if !m.optional => {
+                let (object, index) = (self.expr(&m.object), self.expr(&m.expression));
+                self.read(object, index)
+            }
+            Expression::ArrowFunctionExpression(f) if !f.r#async => match arrow_body(f) {
+                Some(body) => self.closure(&f.params, body),
+                None => self.unsupported(),
+            },
+            Expression::FunctionExpression(f) if !f.r#async && !f.generator && f.id.is_none() => match &f.body {
+                Some(b) => self.closure(&f.params, Body::Block(b)),
+                None => self.unsupported(),
+            },
+            Expression::CallExpression(c) if !c.optional => self.call(c),
+            _ => self.unsupported(),
+        }
+    }
+    pub fn unsupported(&mut self) -> Val<'a> {
+        Val::Term(self.b.unsupported(), Ty::Any)
+    }
+    fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
+        let env = self.env.clone();
+        Val::Fun(Rc::new(Fun { params, body, env }))
+    }
+    fn ident(&mut self, id: &IdentifierReference<'_>) -> Val<'a> {
+        match self.scoping.get_reference(id.reference_id()).symbol_id() {
+            Some(symbol) => self.env.get(&symbol).cloned().unwrap_or_else(|| self.unsupported()),
+            None => self.free(id.name.as_str()),
+        }
+    }
+    fn free(&mut self, name: &str) -> Val<'a> {
+        match name {
+            "undefined" => return Val::Undef,
+            "NaN" => return Val::NaN,
+            _ => {}
+        }
+        let kind = self.kinds.get(name).copied().unwrap_or(Kind::Any);
+        let var = self.b.var(kind, name);
+        match kind {
+            Kind::Int => Val::Num(Form::atom(var)),
+            Kind::List => Val::Term(var, Ty::List),
+            Kind::Fun => Val::Term(var, Ty::Defined),
+            _ => Val::Term(var, Ty::Any),
+        }
+    }
+}
+
+impl<'a> Lowerer<'a, '_> {
+    fn unary(&mut self, u: &'a UnaryExpression<'a>) -> Val<'a> {
+        let v = self.expr(&u.argument);
+        match u.operator {
+            UnaryOperator::LogicalNot => self.not(v),
+            UnaryOperator::UnaryNegation => self.binary(Bin::Sub, Val::int(0), v),
+            _ => self.unsupported(),
+        }
+    }
+    fn binop(&mut self, b: &'a BinaryExpression<'a>) -> Val<'a> {
+        use BinaryOperator as B;
+        let (left, right) = (self.expr(&b.left), self.expr(&b.right));
+        match b.operator {
+            B::Addition => self.binary(Bin::Add, left, right),
+            B::Subtraction => self.binary(Bin::Sub, left, right),
+            B::Multiplication => self.binary(Bin::Mul, left, right),
+            B::LessThan => self.binary(Bin::Lt, left, right),
+            B::LessEqualThan => self.binary(Bin::Le, left, right),
+            B::GreaterThan => self.binary(Bin::Lt, right, left),
+            B::GreaterEqualThan => self.binary(Bin::Le, right, left),
+            B::StrictEquality => self.binary(Bin::Eq, left, right),
+            B::StrictInequality => {
+                let eq = self.binary(Bin::Eq, left, right);
+                self.not(eq)
+            }
+            _ => self.unsupported(),
+        }
+    }
+    fn template(&mut self, t: &'a TemplateLiteral<'a>) -> Val<'a> {
+        let mut out = Val::Str(Utf16::new([]));
+        for (i, quasi) in t.quasis.iter().enumerate() {
+            let Some(cooked) = &quasi.value.cooked else { return self.unsupported() };
+            out = self.binary(Bin::Add, out, Val::Str(Utf16::new(cooked.encode_utf16())));
+            if let Some(e) = t.expressions.get(i) {
+                let v = self.expr(e);
+                out = self.binary(Bin::Add, out, v);
+            }
+        }
+        out
+    }
+    fn array(&mut self, a: &'a ArrayExpression<'a>) -> Val<'a> {
+        let mut out = Val::empty();
+        for element in &a.elements {
+            let segment = match element {
+                ArrayExpressionElement::SpreadElement(s) => self.expr(&s.argument),
+                ArrayExpressionElement::Elision(_) => return self.unsupported(),
+                e => {
+                    let v = self.expr(e.to_expression());
+                    Val::List(Rc::new(vec![v]))
+                }
+            };
+            out = self.append(out, segment);
+        }
+        out
+    }
+}
+
+impl<'a> Lowerer<'a, '_> {
+    fn logical(&mut self, l: &'a LogicalExpression<'a>) -> Val<'a> {
+        let left = self.expr(&l.left);
+        let right = Arm::Expr(&l.right);
+        match l.operator {
+            LogicalOperator::Coalesce => self.coalesce(left, right),
+            LogicalOperator::Or => self.short_circuit(left, right, true),
+            LogicalOperator::And => self.short_circuit(left, right, false),
+        }
+    }
+    /// `left ?? right`: right where left is undefined.
+    pub fn coalesce(&mut self, left: Val<'a>, right: Arm<'a, '_>) -> Val<'a> {
+        let probe = self.arm(right);
+        let family = if matches!(probe, Val::Term(_, Ty::Any)) { Family::Undecided } else { Family::Default };
+        self.worlds(left, family, &mut |l, v| match v {
+            Val::Undef => l.arm(right),
+            Val::Term(_, Ty::Any) => {
+                let fallback = l.arm(right);
+                l.dynamic("??", &[&v, &fallback], Ty::Any)
+            }
+            v => v,
+        })
+    }
+    /// `left || right` (or) and `left && right`.
+    fn short_circuit(&mut self, left: Val<'a>, right: Arm<'a, '_>, or: bool) -> Val<'a> {
+        self.worlds(left, Family::Default, &mut |l, v| match l.truthy(v.clone()) {
+            Val::Bool(b) if b == or => v,
+            Val::Bool(_) => l.arm(right),
+            Val::Throw => Val::Throw,
+            test => {
+                let other = l.arm(right);
+                if or { l.select(&test, v, other) } else { l.select(&test, other, v) }
+            }
+        })
+    }
+    fn conditional(&mut self, c: &'a ConditionalExpression<'a>) -> Val<'a> {
+        let test = self.expr(&c.test);
+        self.branch(test, Arm::Expr(&c.consequent), Arm::Expr(&c.alternate))
+    }
+    /// `test ? yes : no`, lowering each arm in every world of the splits in `test`.
+    pub fn branch(&mut self, test: Val<'a>, yes: Arm<'a, '_>, no: Arm<'a, '_>) -> Val<'a> {
+        self.worlds(test, Family::Default, &mut |l, t| match l.truthy(t) {
+            Val::Bool(true) => l.arm(yes),
+            Val::Bool(false) => l.arm(no),
+            Val::Throw => Val::Throw,
+            test => {
+                let (y, n) = (l.arm(yes), l.arm(no));
+                l.select(&test, y, n)
+            }
+        })
+    }
+    pub fn arm(&mut self, arm: Arm<'a, '_>) -> Val<'a> {
+        match arm {
+            Arm::Expr(e) => self.expr(e),
+            Arm::Run(s) => self.run(s),
+            Arm::Val(v) => v.clone(),
+        }
+    }
+}
+
+impl<'a, 'l> Lowerer<'a, 'l> {
+    /// Run `then` in each world of every split in `v`, with that split's read narrowed.
+    pub fn worlds(&mut self, v: Val<'a>, family: Family, then: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
+        let Val::Split(s) = v else { return then(self, v) };
+        let absent = self.within(s.read, Val::Undef, |l| l.worlds(s.absent.clone(), family, then));
+        let element = Val::Term(s.elem, Ty::Defined);
+        let present = self.within(s.read, element, |l| l.worlds(s.present.clone(), family, then));
+        self.resplit(&s, absent, present, family)
+    }
+    fn within(&mut self, read: Id, value: Val<'a>, f: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {
+        let old = self.narrow.insert(read, value);
+        let out = f(self);
+        match old {
+            Some(old) => self.narrow.insert(read, old),
+            None => self.narrow.remove(&read),
+        };
+        out
+    }
+    /// `test ? yes : no` for a symbolic boolean test, pushed inside any splits.
+    pub fn select(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
+        self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, y, n))
+    }
+    fn choose(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
+        if yes.is_known() && super::ops::same(&yes, &no) == Some(true) {
+            return yes;
+        }
+        let ty = join(&yes, &no);
+        let (c, y, n) = (self.b.emit(test), self.b.emit(&yes), self.b.emit(&no));
+        let id = self.b.add(Core::If([c, y, n]));
+        match ty {
+            None => Val::Num(Form::atom(id)),
+            Some(ty) => Val::Term(id, ty),
+        }
+    }
+}
+
+/// The type of a value that is one of two; None for an integer.
+fn join(a: &Val<'_>, b: &Val<'_>) -> Option<Ty> {
+    let ty = |v: &Val<'_>| match v {
+        Val::Num(_) => None,
+        Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(Ty::Bool),
+        Val::Str(_) | Val::Term(_, Ty::Str) => Some(Ty::Str),
+        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List) => Some(Ty::List),
+        Val::Undef | Val::Term(_, Ty::Any) | Val::Split(_) => Some(Ty::Any),
+        _ => Some(Ty::Defined),
+    };
+    match (ty(a), ty(b)) {
+        (x, y) if x == y => x,
+        (Some(Ty::Any), _) | (_, Some(Ty::Any)) => Some(Ty::Any),
+        _ => Some(Ty::Defined),
+    }
+}
+
+fn integer(value: f64) -> Option<i64> {
+    let whole = value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0;
+    #[allow(clippy::cast_possible_truncation)]
+    whole.then_some(value as i64)
+}
+
+fn arrow_body<'a>(f: &'a oxc_ast::ast::ArrowFunctionExpression<'a>) -> Option<Body<'a>> {
+    match &f.body {
+        oxc_ast::ast::ArrowFunctionBody::FunctionBody(b) => Some(Body::Block(b)),
+        b => b.as_expression().map(Body::Expr),
+    }
+}
