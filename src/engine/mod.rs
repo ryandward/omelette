@@ -4,7 +4,7 @@ mod detect;
 mod rules;
 
 pub use analysis::{Const, Data, Facts, Graph};
-use crate::core::{Core, Family};
+use crate::core::{Core, Family, Mutator};
 use egg::{CostFunction, Extractor, Id, Language, RecExpr, Runner, SimpleScheduler, StopReason};
 use std::fmt;
 use std::sync::OnceLock;
@@ -27,10 +27,30 @@ impl fmt::Display for Verdict {
     }
 }
 
+/// Whether the expression mutates an array or object someone outside it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mutation {
+    None,
+    /// The mutations that reach an array or object the caller holds.
+    Observable(Vec<Mutator>),
+    Undecided,
+}
+
+impl fmt::Display for Mutation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Observable(_) => "MUTATION",
+            Self::Undecided => "UNDECIDED",
+        })
+    }
+}
+
 pub struct Evaluation {
     pub verdict: Verdict,
     /// The flows by which a missing read is swallowed, when the verdict is CHEAT.
     pub families: Vec<Family>,
+    pub mutation: Mutation,
     pub saturated: bool,
     pub consistent: bool,
     pub iterations: usize,
@@ -96,7 +116,11 @@ pub fn evaluate_with_limits(source: &str, limits: Limits) -> Result<Evaluation, 
     let start = Instant::now();
     let lowered = crate::lower::lower(source)?;
     let parse_time = start.elapsed();
-    let run = runner(limits).with_expr(&lowered.expr).run(rules::rules());
+    let mut runner = runner(limits).with_expr(&lowered.expr);
+    if let Some(effects) = &lowered.effects {
+        runner = runner.with_expr(effects);
+    }
+    let run = runner.run(rules::rules());
     if std::env::var_os("TRACE").is_some() {
         trace(&run);
     }
@@ -107,10 +131,13 @@ pub fn evaluate_with_limits(source: &str, limits: Limits) -> Result<Evaluation, 
     found.opaque |= lowered.opaque;
     let verdict = judge(saturated && consistent, &found);
     let families = if verdict == Verdict::Cheat { found.families.into_iter().collect() } else { Vec::new() };
+    let effects = run.roots.get(1).map(|&id| detect::mutations(&run.egraph, id)).unwrap_or_default();
+    let mutation = judge_mutation(saturated && consistent, &effects, lowered.opaque);
     let canonical = Extractor::new(&run.egraph, Cost).find_best(root).1;
     Ok(Evaluation {
         verdict,
         families,
+        mutation,
         saturated,
         consistent,
         iterations: run.iterations.len(),
@@ -134,6 +161,20 @@ fn judge(sound: bool, found: &detect::Findings) -> Verdict {
         Verdict::Undecided
     } else {
         Verdict::NoCheat
+    }
+}
+
+/// Unsound runs decide nothing; a mutation of what the caller holds is observable; one of
+/// an unknown holder, or anything lowering does not model, may be.
+fn judge_mutation(sound: bool, effects: &detect::Mutations, opaque: bool) -> Mutation {
+    if !sound {
+        Mutation::Undecided
+    } else if !effects.observable.is_empty() {
+        Mutation::Observable(effects.observable.iter().copied().collect())
+    } else if effects.unknown || opaque {
+        Mutation::Undecided
+    } else {
+        Mutation::None
     }
 }
 

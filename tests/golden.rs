@@ -57,3 +57,16 @@ fn the_two_element_slice_sum_stays_a_fold() {
     let r = common::checked("widths.slice(i, i + 2).reduce((a, b) => a + b, 0)", Verdict::NoCheat);
     assert!(r.nodes < 30, "{} nodes", r.nodes);
 }
+
+#[test]
+fn mutation_cases_saturate_with_their_verdicts() {
+    initialize();
+    let cases = include_str!("mutations.txt").lines().filter(|l| !l.starts_with('#') && !l.is_empty());
+    for line in cases {
+        let (expected, source) = line.split_once('\t').unwrap();
+        let r = evaluate(source).unwrap();
+        assert!(r.consistent && r.saturated, "{source}: {}", r.stop);
+        assert!(r.nodes < 150, "{source}: {} nodes", r.nodes);
+        assert_eq!(r.mutation.to_string(), expected, "{source}: {}", r.canonical);
+    }
+}

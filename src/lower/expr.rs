@@ -55,11 +55,23 @@ impl<'a> Lowerer<'a, '_> {
                 None => self.unsupported(),
             },
             Expression::CallExpression(c) if !c.optional => self.call(c),
+            Expression::AssignmentExpression(a) => self.assignment(a),
+            Expression::UpdateExpression(u) => self.increment(u),
+            Expression::SequenceExpression(s) => self.sequence(&s.expressions),
             _ => self.unsupported(),
         }
     }
+    /// `a, b, c`: each in turn, so one that throws stops the rest; the last one's value.
+    fn sequence(&mut self, exprs: &'a [Expression<'a>]) -> Val<'a> {
+        let Some((first, rest)) = exprs.split_first() else { return Val::Undef };
+        let v = self.expr(first);
+        if rest.is_empty() {
+            return v;
+        }
+        self.strict(vec![v], &mut |l, _| l.sequence(rest))
+    }
     pub fn unsupported(&mut self) -> Val<'a> {
-        self.opaque = true;
+        self.clobber();
         Val::Term(self.b.unsupported(), Ty::Any)
     }
     fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
@@ -96,6 +108,9 @@ impl<'a> Lowerer<'a, '_> {
 
 impl<'a> Lowerer<'a, '_> {
     fn unary(&mut self, u: &'a UnaryExpression<'a>) -> Val<'a> {
+        if u.operator == UnaryOperator::Delete {
+            return self.delete(&u.argument);
+        }
         let v = self.expr(&u.argument);
         match u.operator {
             UnaryOperator::LogicalNot => self.not(v),
@@ -173,14 +188,16 @@ impl<'a> Lowerer<'a, '_> {
     /// `left ?? right`: right where left is undefined.
     pub fn coalesce(&mut self, left: Val<'a>, right: Arm<'a, '_>) -> Val<'a> {
         // The probe only types the fallback; lowering it evaluates nothing.
-        let opaque = self.opaque;
-        let probe = self.arm(right);
-        self.opaque = opaque;
+        let probe = self.speculate(|l| l.arm(right));
         let family = if matches!(probe, Val::Term(_, Ty::Any)) { Family::Undecided } else { Family::Default };
         self.worlds(left, family, &mut |l, v| match v {
             Val::Undef => l.arm(right),
             Val::Term(_, Ty::Any) => {
-                let fallback = l.arm(right);
+                // The fallback runs only where `v` is nullish, which lowering cannot decide.
+                let taken = l.dynamic("nullish", &[&v], Ty::Bool);
+                let (_, fallback) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &mut |l, without, with| {
+                    l.select(&taken, with, without)
+                });
                 let ty = if fallback.defined() { Ty::Defined } else { Ty::Any };
                 l.dynamic("??", &[&v, &fallback], ty)
             }
@@ -188,13 +205,16 @@ impl<'a> Lowerer<'a, '_> {
         })
     }
     /// `left || right` (or) and `left && right`.
-    fn short_circuit(&mut self, left: Val<'a>, right: Arm<'a, '_>, or: bool) -> Val<'a> {
+    pub fn short_circuit(&mut self, left: Val<'a>, right: Arm<'a, '_>, or: bool) -> Val<'a> {
         self.worlds(left, Family::Default, &mut |l, v| match l.truthy(v.clone()) {
             Val::Bool(b) if b == or => v,
             Val::Bool(_) => l.arm(right),
             Val::Throw => Val::Throw,
             test => {
-                let other = l.arm(right);
+                // The right operand runs only where the left does not decide.
+                let (_, other) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &mut |l, without, with| {
+                    if or { l.select(&test, without, with) } else { l.select(&test, with, without) }
+                });
                 if or { l.select(&test, v, other) } else { l.select(&test, other, v) }
             }
         })
@@ -210,7 +230,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Bool(false) => l.arm(no),
             Val::Throw => Val::Throw,
             test => {
-                let (y, n) = (l.arm(yes), l.arm(no));
+                let (y, n) = l.fork(&mut |l, second| l.arm(if second { no } else { yes }), &mut |l, a, b| l.select(&test, a, b));
                 l.select(&test, y, n)
             }
         })
@@ -228,9 +248,13 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     /// Run `then` in each world of every split in `v`, with that split's read narrowed.
     pub fn worlds(&mut self, v: Val<'a>, family: Family, then: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
         let Val::Split(s) = v else { return then(self, v) };
-        let absent = self.within(s.read, Val::Undef, |l| l.worlds(s.absent.clone(), family, then));
-        let element = Val::Term(s.elem, s.items.ty());
-        let present = self.within(s.read, element, |l| l.worlds(s.present.clone(), family, then));
+        let (absent, present) = self.fork(
+            &mut |l, present| {
+                let (world, side) = if present { (Val::Term(s.elem, s.items.ty()), s.present.clone()) } else { (Val::Undef, s.absent.clone()) };
+                l.within(s.read, world, |l| l.worlds(side, family, then))
+            },
+            &mut |l, a, p| l.resplit(&s, a, p, Family::Propagate),
+        );
         self.resplit(&s, absent, present, family)
     }
     pub fn within(&mut self, read: Id, value: Val<'a>, f: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {

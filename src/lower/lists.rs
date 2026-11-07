@@ -49,7 +49,7 @@ impl<'a> Lowerer<'a, '_> {
     /// index came from a walker.
     pub fn element(&mut self, list: Seq, index: &Form) -> Val<'a> {
         if let Some((f, base)) = self.maps.get(&list.id).cloned() {
-            return self.mapped(&f, base, index);
+            return self.mapped(&f, base, list.id, index);
         }
         let idx = self.b.form(index);
         if self.in_range(list.id, index) {
@@ -91,16 +91,21 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// An element of `base.map(f)`: `f` applied to the element of `base` where present, as
     /// map calls it: with the element, its index, and `base`, which is non-empty there.
-    fn mapped(&mut self, f: &Val<'a>, base: Seq, index: &Form) -> Val<'a> {
+    fn mapped(&mut self, f: &Val<'a>, base: Seq, list: Id, index: &Form) -> Val<'a> {
         let slot = self.element(base, index);
-        let (f, index) = (f.clone(), index.clone());
+        let (f, place) = (f.clone(), (list, self.b.form(index)));
+        let index = index.clone();
         self.worlds(slot, Family::Propagate, &mut |l, x| match x {
             Val::Undef => Val::Undef,
             x => {
-                l.walking.push(base.id);
-                let out = l.apply(f.clone(), vec![x, Val::Num(index.clone()), base.val()]);
-                l.walking.pop();
-                out
+                // The map already ran the callback on this element, effects and all.
+                let out = l.speculate(|l| {
+                    l.walking.push(base.id);
+                    let out = l.apply(f.clone(), vec![x, Val::Num(index.clone()), base.val()]);
+                    l.walking.pop();
+                    out
+                });
+                l.held(place, out)
             }
         })
     }
@@ -127,6 +132,9 @@ impl<'a> Lowerer<'a, '_> {
         }
         let e = self.b.fresh(items.kind());
         self.elems.insert(read, e);
+        if let Core::Read([list, _]) = self.b.node(read) {
+            self.members.insert(e, *list);
+        }
         e
     }
     /// A literal list as a term.
@@ -167,7 +175,7 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and
     /// possibly undefined for a value of unknown type.
-    fn length(&mut self, v: Val<'a>) -> Val<'a> {
+    pub fn length(&mut self, v: Val<'a>) -> Val<'a> {
         let v = self.deref(v);
         match v {
             Val::Undef | Val::Throw => Val::Throw,
@@ -231,8 +239,9 @@ impl<'a> Lowerer<'a, '_> {
             Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::Defined)),
             Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Term(_, Ty::Bool) => Val::Throw,
             Val::Term(_, Ty::Defined | Ty::Any) | Val::Split(_) => {
-                self.opaque = true;
-                self.dynamic("iterate", &[&v], Ty::List(Items::Any))
+                let spread = self.dynamic("iterate", &[&v], Ty::List(Items::Any));
+                self.clobber();
+                spread
             }
         }
     }

@@ -1,0 +1,63 @@
+# expected mutation verdict <TAB> expression. scripts/check.sh fails on a mismatch, a run that does
+# not saturate, or an inconsistent graph.
+# Leaking mutations: an in-place operation reaches an array or object the caller holds.
+MUTATION	xs.sort()
+MUTATION	xs.push(1)
+MUTATION	xs.pop()
+MUTATION	xs.shift()
+MUTATION	xs.unshift(0)
+MUTATION	xs.reverse()
+MUTATION	xs.splice(0, 1)
+MUTATION	xs.fill(0)
+MUTATION	xs.copyWithin(0, 1)
+MUTATION	xs[i] = 0
+MUTATION	xs.length = 0
+MUTATION	o.name = 'x'
+MUTATION	groups.map((g) => g.sort())
+MUTATION	groups[i].push(1)
+MUTATION	(() => { const a = xs; a.push(1); return a; })()
+MUTATION	((a) => a.reverse())(xs)
+MUTATION	xs.map((x, i, a) => a.pop())
+MUTATION	[xs][0].push(1)
+MUTATION	(() => { const a = []; xs.push(a); a.push(1); return 0; })()
+MUTATION	xs.sort((a, b) => a - b)
+MUTATION	(c ? xs : [...ys]).push(xs.length)
+MUTATION	xs[i] === undefined ? ys.push(1) : 0
+MUTATION	xs[i]++
+MUTATION	delete xs[i]
+MUTATION	(xs[0] = 1, 2)
+MUTATION	xs.filter((x) => x > 0).map((x) => x.push(1))
+MUTATION	(() => { const m = xs.map((x) => x); m[0].push(1); return m; })()
+MUTATION	xs.slice(i, i + 1).map((x) => x.push(1))
+MUTATION	xs.slice().map((x) => x.push(1))
+MUTATION	[0, 1].some((x) => x > 0 && xs.push(1))
+MUTATION	(() => { const a = [xs]; a[0].push(1); return a; })()
+# Pure transforms and honest local construction: the mutated array is one the expression built
+# and holds alone, or the mutation never runs.
+none	[...xs].sort()
+none	xs.slice().reverse()
+none	xs.map((x) => x * 2).sort()
+none	xs.filter((x) => x > 0).sort()
+none	(() => { const a = []; a.push(1); a.push(2); return a; })()
+none	(() => { const a = [...xs]; a.sort(); return a; })()
+none	(() => { const a = xs.slice(); const b = a; b.push(1); return a; })()
+none	[1, 2, 3].reverse()
+none	[3, 1, 2].sort()
+none	xs.concat([1]).sort()
+none	(() => { const rows = [[], []]; rows[0].push(1); return rows; })()
+none	xs.length >= 0 ? 0 : ys.push(1)
+none	xs.filter(() => false).map((x) => ys.push(x))
+none	(true ? [...xs] : xs).push(1)
+none	xs.map((x) => [x]).map((p) => p.push(1))
+none	[0, 1].every((x) => x > 0 && xs.push(1))
+none	(() => { const m = xs.map((x) => [x]); m[0].push(1); return m; })()
+none	(xs[i] ?? []).length
+none	xs.map((x) => { const a = [x]; a.push(x); return a; })
+# Unknown holders: the mutated value may or may not be the caller's, or code lowering cannot see
+# may mutate.
+UNDECIDED	xs.reduce((acc, x) => (acc.push(x), acc), ys)
+UNDECIDED	xs.reduce((acc, x) => (acc.push(x), acc), [])
+UNDECIDED	f(xs)
+UNDECIDED	xs.forEach((x) => x)
+UNDECIDED	xs.map(f)
+UNDECIDED	(c ? xs : [...ys]).push(1)

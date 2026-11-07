@@ -59,15 +59,16 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             _ => return op(self, a, b),
         };
         let other = if flipped { a } else { b };
-        let mut side = |l: &mut Self, mine: Val<'a>, present: bool| {
-            let world = if present { Val::Term(s.elem, s.items.ty()) } else { Val::Undef };
-            l.within(s.read, world, |l| {
-                let other = l.assume(other.clone(), s.read, present);
-                if flipped { l.lift2(other, mine, family, op) } else { l.lift2(mine, other, family, op) }
-            })
-        };
-        let absent = side(self, s.absent.clone(), false);
-        let present = side(self, s.present.clone(), true);
+        let (absent, present) = self.fork(
+            &mut |l, present| {
+                let (world, mine) = if present { (Val::Term(s.elem, s.items.ty()), s.present.clone()) } else { (Val::Undef, s.absent.clone()) };
+                l.within(s.read, world, |l| {
+                    let other = l.assume(other.clone(), s.read, present);
+                    if flipped { l.lift2(other, mine, family, op) } else { l.lift2(mine, other, family, op) }
+                })
+            },
+            &mut |l, a, p| l.resplit(&s, a, p, Family::Propagate),
+        );
         self.resplit(&s, absent, present, family)
     }
     pub fn lift(&mut self, v: Val<'a>, family: Family, op: &mut Op1<'a, 'l, '_>) -> Val<'a> {

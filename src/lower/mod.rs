@@ -4,6 +4,7 @@ mod build;
 mod calls;
 mod expr;
 mod lists;
+mod mutate;
 mod ops;
 mod refs;
 mod usage;
@@ -23,6 +24,9 @@ use value::{Env, Val};
 /// A lowered expression.
 pub struct Lowered {
     pub expr: RecExpr<Core>,
+    /// The mutations someone outside the expression may observe, as a list of `mutate`
+    /// terms; `None` when there are none.
+    pub effects: Option<RecExpr<Core>>,
     /// Lowering evaluated a construct it does not model, a call it could not resolve, or a
     /// walker over an unknown callback. Any of them may throw, so the expression's value is
     /// unknown even where its term does not mention them.
@@ -64,7 +68,15 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
             let mut lowerer = Lowerer::new(semantic.scoping(), &kinds);
             let value = lowerer.expr(expression(program));
             let root = lowerer.emit(&value);
-            Lowered { expr: lowerer.b.finish(root), opaque: lowerer.opaque }
+            let log = lowerer.state.log.clone();
+            let effects = match &log {
+                Val::List(entries) if entries.is_empty() => None,
+                log => {
+                    let id = lowerer.emit(log);
+                    Some(lowerer.b.finish(id))
+                }
+            };
+            Lowered { expr: lowerer.b.finish(root), effects, opaque: lowerer.opaque }
         })
         .collect())
 }
@@ -100,6 +112,14 @@ pub struct Lowerer<'a, 'l> {
     elems: HashMap<Id, Id>,
     /// Each walker index binder, with the list it ranges over.
     coords: HashMap<Id, Id>,
+    /// Each element binder, with the list it is an element of.
+    members: HashMap<Id, Id>,
+    /// The identity of an array recomputed at a place: a list term and an index.
+    places: HashMap<(Id, Id), value::RefKey>,
+    /// Mapped lists whose callback builds a new array for every element.
+    fresh: std::collections::HashSet<Id>,
+    /// Whether the last walker callback lowered returned an array it built.
+    built: bool,
     /// The lists whose walkers' callbacks are being lowered: each is non-empty there.
     walking: Vec<Id>,
     /// Each mapped list, with its callback and the list it maps.
@@ -127,11 +147,15 @@ impl<'l> Lowerer<'_, 'l> {
             narrow: HashMap::new(),
             elems: HashMap::new(),
             coords: HashMap::new(),
+            members: HashMap::new(),
+            places: HashMap::new(),
+            fresh: std::collections::HashSet::new(),
+            built: false,
             walking: Vec::new(),
             maps: HashMap::new(),
             depth: 0,
             opaque: false,
-            state: refs::State::default(),
+            state: refs::State::new(),
             choices: Vec::new(),
             next_ref: 0,
             this: None,

@@ -1,4 +1,5 @@
-//! Latency of the golden cases. Run with `cargo run --release --example latency -- 500 --check`.
+//! Latency of the golden cases, absence and mutation. Run with
+//! `cargo run --release --example latency -- 500 --check`.
 use omelette::{engine, lower};
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -38,12 +39,23 @@ fn sample(src: &str, into: &mut Samples) {
     into.total.push(micros(start));
 }
 
-fn report(index: usize, (want, src): (&str, &str), samples: &mut Samples, check: bool) {
+/// A golden case: which verdict it checks (the absence verdict, or the mutation verdict when
+/// `mutation`), the expected one, and the source.
+#[derive(Clone, Copy)]
+struct Case<'s> {
+    mutation: bool,
+    want: &'s str,
+    src: &'s str,
+}
+
+fn report(index: usize, case: Case<'_>, samples: &mut Samples, check: bool) {
     for v in [&mut samples.parse, &mut samples.lower, &mut samples.total] {
         v.sort_by(f64::total_cmp);
     }
+    let src = case.src;
     let r = engine::evaluate(src).expect("a golden case parses");
-    assert_eq!(r.verdict.to_string(), want, "{src}");
+    let got = if case.mutation { r.mutation.to_string() } else { r.verdict.to_string() };
+    assert_eq!(got, case.want, "{src}");
     assert!(r.saturated && r.consistent, "{src}");
     let (p, l, t) = (&samples.parse, &samples.lower, &samples.total);
     if check {
@@ -73,27 +85,29 @@ fn main() {
     let start = Instant::now();
     engine::initialize();
     println!("runtime initialization: {:.1} us", micros(start));
-    let cases: Vec<(&str, &str)> = include_str!("../tests/cases.txt")
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-        .filter_map(|l| l.split_once('\t'))
-        .collect();
-    let cold = engine::evaluate(cases[0].1).expect("a golden case parses");
+    let golden = |text: &'static str, mutation: bool| {
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .filter_map(|l| l.split_once('\t'))
+            .map(move |(want, src)| Case { mutation, want, src })
+    };
+    let cases: Vec<Case<'_>> = golden(include_str!("../tests/cases.txt"), false).chain(golden(include_str!("../tests/mutations.txt"), true)).collect();
+    let cold = engine::evaluate(cases[0].src).expect("a golden case parses");
     println!(
         "first evaluation after runtime init: {:.1} us total, {:.1} us parse/lower",
         cold.total_time.as_secs_f64() * 1e6,
         cold.parse_time.as_secs_f64() * 1e6
     );
-    for (_, src) in &cases {
+    for case in &cases {
         for _ in 0..5 {
-            black_box(engine::evaluate(src).ok());
+            black_box(engine::evaluate(case.src).ok());
         }
     }
     // Interleave inputs so later cases do not systematically receive a warmer CPU.
     let mut samples = vec![Samples::default(); cases.len()];
     for _ in 0..count.max(1) {
-        for ((_, src), into) in cases.iter().zip(&mut samples) {
-            sample(src, into);
+        for (case, into) in cases.iter().zip(&mut samples) {
+            sample(case.src, into);
         }
     }
     println!("case\tparse p50/p95 us\tlower p50/p95 us\ttotal p50/p95/p99/max us\tnodes\titers");

@@ -24,10 +24,14 @@ impl<'a> Lowerer<'a, '_> {
             }
             let receiver = self.expr(&m.object);
             let name = m.property.name.as_str();
+            let mutator = crate::core::Mutator::method(name);
             let values = std::iter::once(receiver).chain(args).collect();
             return self.strict(values, &mut |l, mut values| {
                 let receiver = values.remove(0);
-                l.method(receiver, name, &values)
+                match mutator {
+                    Some(m) => l.mutate(receiver, m, &values),
+                    None => l.method(receiver, name, &values),
+                }
             });
         }
         let callee = self.expr(&c.callee);
@@ -53,9 +57,9 @@ impl<'a> Lowerer<'a, '_> {
             Val::Fun(f) if self.depth < INLINE_DEPTH => self.inline(&f, args),
             Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| l.invoke(f, args.clone())),
             callee => {
-                self.opaque = true;
                 let mut children = vec![self.emit(&callee)];
                 children.extend(args.iter().map(|a| self.emit(a)));
+                self.clobber();
                 Val::Term(self.b.add(Core::Call(children.into())), Ty::Any)
             }
         }
@@ -138,6 +142,10 @@ impl<'a> Lowerer<'a, '_> {
                 self.run(&inner)
             }
             Statement::EmptyStatement(_) => self.run(rest),
+            Statement::ExpressionStatement(e) => {
+                let v = self.expr(&e.expression);
+                self.strict(vec![v], &mut |l, _| l.run(rest))
+            }
             _ => self.unsupported(),
         }
     }
@@ -209,14 +217,15 @@ impl<'a> Lowerer<'a, '_> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "map" => {
+                // Each result is held in the new list, so an array among them gets an identity.
                 let mapped = self.each(items, &f);
-                self.strict(mapped, &mut |_, mapped| Val::List(Rc::new(mapped)))
+                self.strict(mapped, &mut |l, mapped| Val::List(Rc::new(mapped.into_iter().map(|v| l.own(v)).collect())))
             }
             "filter" => self.filter_items(items, &f),
-            "find" => self.find_items(items, &f),
+            "find" => self.find_items(items, &f, 0),
             "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
             "at" => self.at_items(items, &f),
-            "every" | "some" => self.quantify(items, &f, name == "every"),
+            "every" | "some" => self.quantify(items, &f, name == "every", 0),
             "reduce" => self.fold_items(items, &f, args.get(1).cloned()),
             "join" => self.join_items(items, args.first().cloned()),
             "flat" => self.flat_items(items),
@@ -237,12 +246,23 @@ impl<'a> Lowerer<'a, '_> {
         let indexed = items.iter().cloned().zip(0_i64..);
         indexed.map(|(x, k)| self.apply(f.clone(), vec![x, Val::int(k), list.clone()])).collect()
     }
-    fn quantify(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, every: bool) -> Val<'a> {
-        let results = self.each(items, f);
-        results.into_iter().rev().fold(Val::Bool(every), |rest, v| {
-            let rest = Arm::Val(&rest);
-            let truth = self.truthy_split(v);
-            if every { self.branch(truth, rest, Arm::Val(&Val::Bool(false))) } else { self.branch(truth, Arm::Val(&Val::Bool(true)), rest) }
+    /// `every` or `some` over a literal list, from element `k`: each callback runs only while
+    /// the answer is still open.
+    fn quantify(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, every: bool, k: usize) -> Val<'a> {
+        let Some(item) = items.get(k).cloned() else { return Val::Bool(every) };
+        let list = self.this_or(Val::List(items.clone()));
+        let v = self.apply(f.clone(), vec![item, Val::int(i64::try_from(k).unwrap_or(i64::MAX)), list]);
+        let truth = self.truthy_split(v);
+        self.worlds(truth, Family::Default, &mut |l, t| match l.truthy(t) {
+            Val::Bool(b) if b == every => l.quantify(items, f, every, k + 1),
+            Val::Bool(_) => Val::Bool(!every),
+            Val::Throw => Val::Throw,
+            t => {
+                let pick = |l: &mut Self, more: Val<'a>, stop: Val<'a>| if every { l.select(&t, more, stop) } else { l.select(&t, stop, more) };
+                let (more, stop) =
+                    l.fork(&mut |l, second| if second { Val::Bool(!every) } else { l.quantify(items, f, every, k + 1) }, &mut |l, a, b| pick(l, a, b));
+                pick(l, more, stop)
+            }
         })
     }
     fn truthy_split(&mut self, v: Val<'a>) -> Val<'a> {
@@ -385,7 +405,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             let pass = self.truthy_split(applied);
             next.keep = self.and_split(s.keep.clone(), pass);
         } else {
-            next.elem = applied;
+            next.elem = self.own(applied);
         }
         let next = Val::Short(Rc::new(next));
         if name == "flatMap" { self.method(next, "flat", &[]) } else { next }
@@ -438,8 +458,9 @@ impl<'a> Lowerer<'a, '_> {
         let (lam, items) = match f {
             Val::Fun(_) => self.callback(kind, f, list),
             other => {
-                self.opaque = true;
-                (self.emit(other), Items::Any)
+                let lam = self.emit(other);
+                self.clobber();
+                (lam, Items::Any)
             }
         };
         let node = self.b.add(match kind {
@@ -450,6 +471,9 @@ impl<'a> Lowerer<'a, '_> {
         });
         if kind == Walker::Map && matches!(f, Val::Fun(_)) {
             self.maps.insert(node, (f.clone(), list));
+            if std::mem::take(&mut self.built) {
+                self.fresh.insert(node);
+            }
         }
         Seq { id: node, items: if kind == Walker::Map { items } else { list.items } }
     }
@@ -457,10 +481,15 @@ impl<'a> Lowerer<'a, '_> {
     fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> (Id, Items) {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
+        self.members.insert(x, list.id);
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
-        let result = self.apply(f.clone(), args);
+        let before = self.next_ref;
+        let result = self.repeat(list.id, |l| l.apply(f.clone(), args));
         self.walking.pop();
+        // A callback that returns an array it just built builds a new one for every element.
+        self.built = matches!(result, Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)))
+            || matches!(result, Val::Ref(super::value::RefKey::Local(k)) if k > before);
         let items = Items::of(result.defined());
         let body = if kind == Walker::Map {
             self.escape(&result)
@@ -528,12 +557,11 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn projected_index(&mut self, fun: &Fun<'a>, list: Seq, target: &'a Expression<'a>) -> Option<(Form, Id)> {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
-        let (saved, opaque) = (std::mem::replace(&mut self.env, fun.env.clone()), self.opaque);
+        let saved = std::mem::replace(&mut self.env, fun.env.clone());
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
-        let bound = self.bind_params(fun, args);
-        let value = bound.then(|| self.expr(target));
         // Recognizing a projection evaluates nothing; the walker that replaces it does.
-        (self.env, self.opaque) = (saved, opaque);
+        let value = self.speculate(|l| l.bind_params(fun, args).then(|| l.expr(target)));
+        self.env = saved;
         let Some(Val::Num(form)) = value else { return None };
         if form.terms.keys().any(|&a| self.b.mentions(a, x) || self.b.mentions(a, i)) {
             return None;
@@ -556,7 +584,9 @@ impl<'a> Lowerer<'a, '_> {
         let unit = init.clone().unwrap_or(Val::Throw);
         let f = f.clone();
         // Without an initial value, a one-element list returns its element uncalled, so the
-        // law also needs the callback to return its element.
+        // law also needs the callback to return its element. A callback with effects runs on
+        // every element, not only the last.
+        let before = self.state.clone();
         let mut returns_element = true;
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
@@ -568,7 +598,8 @@ impl<'a> Lowerer<'a, '_> {
             }
         });
         let id = self.emit(&body);
-        if self.b.mentions(id, acc) || (init.is_none() && !returns_element) {
+        if self.b.mentions(id, acc) || (init.is_none() && !returns_element) || !self.state.same(&before) {
+            self.state = before;
             return self.fold(list, &f, init);
         }
         body
@@ -581,9 +612,10 @@ impl<'a> Lowerer<'a, '_> {
         }
         let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
+        self.members.insert(x, list.id);
         let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
-        let body = self.apply(f.clone(), args);
+        let body = self.repeat(list.id, |l| l.apply(f.clone(), args));
         self.walking.pop();
         let body = self.emit(&body);
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
@@ -596,7 +628,7 @@ impl<'a> Lowerer<'a, '_> {
     /// `list.slice(start, end)`, whose bounds count from the end when negative. Bounds that
     /// differ by `d >= 0` keep at most `d` elements whatever their signs, so a difference of
     /// one is a list of at most one element; a negative difference can keep any number.
-    fn slice(&mut self, list: Seq, start: Option<Val<'a>>, end: Option<Val<'a>>) -> Val<'a> {
+    pub fn slice(&mut self, list: Seq, start: Option<Val<'a>>, end: Option<Val<'a>>) -> Val<'a> {
         let len = Form::atom(self.b.add(Core::Len(list.id)));
         let start = match start {
             None | Some(Val::Undef) => Form::constant(0),
@@ -700,11 +732,20 @@ impl<'a> Lowerer<'a, '_> {
         })
     }
     /// The first element the callback accepts, or undefined.
-    fn find_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Val<'a> {
-        let decisions = self.each(items, f);
-        items.iter().zip(decisions).rev().fold(Val::Undef, |rest, (item, decision)| {
-            let truth = self.truthy_split(decision);
-            self.branch(truth, Arm::Val(item), Arm::Val(&rest))
+    fn find_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, k: usize) -> Val<'a> {
+        let Some(item) = items.get(k).cloned() else { return Val::Undef };
+        let list = self.this_or(Val::List(items.clone()));
+        let v = self.apply(f.clone(), vec![item.clone(), Val::int(i64::try_from(k).unwrap_or(i64::MAX)), list]);
+        let truth = self.truthy_split(v);
+        self.worlds(truth, Family::Default, &mut |l, t| match l.truthy(t) {
+            Val::Bool(true) => l.settle(item.clone()),
+            Val::Bool(false) => l.find_items(items, f, k + 1),
+            Val::Throw => Val::Throw,
+            t => {
+                let (found, rest) =
+                    l.fork(&mut |l, second| if second { l.find_items(items, f, k + 1) } else { l.settle(item.clone()) }, &mut |l, a, b| l.select(&t, a, b));
+                l.select(&t, found, rest)
+            }
         })
     }
     fn at_items(&mut self, items: &Rc<Vec<Val<'a>>>, index: &Val<'a>) -> Val<'a> {

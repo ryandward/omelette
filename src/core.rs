@@ -61,9 +61,21 @@ define_language! {
         "escape" = Escape([Id; 2]),
         // A call of a function lowering could not resolve: callee, then arguments.
         "call" = Call(Box<[Id]>),
+        // A list's elements in the order a comparator (or `undefined`) sorts them, and in
+        // reverse: the values in-place `sort` and `reverse` leave behind.
+        "sort" = Sort([Id; 2]),
+        "reverse" = Reverse(Id),
+        // An in-place mutation and the owner of the array it reaches: someone outside the
+        // expression, the expression itself, or unknown. A choice between arrays is an `if`
+        // over their owners.
+        "mutate" = Mutate([Id; 2]),
+        "external" = External,
+        "internal" = Internal,
+        "unowned" = Unowned,
         Int(i64),
         Str(Utf16),
         Flow(Family),
+        Op(Mutator),
         Var(Variable),
     }
 }
@@ -180,6 +192,72 @@ impl FromStr for Family {
             .into_iter()
             .find(|f| f.name() == s)
             .ok_or_else(|| s.into())
+    }
+}
+
+/// An operation that changes an array or object in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Mutator {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Splice,
+    Sort,
+    Reverse,
+    Fill,
+    CopyWithin,
+    /// An assignment to an element or property, including `length`.
+    Assign,
+    Delete,
+}
+
+impl Mutator {
+    pub const ALL: [Self; 11] = [
+        Self::Push,
+        Self::Pop,
+        Self::Shift,
+        Self::Unshift,
+        Self::Splice,
+        Self::Sort,
+        Self::Reverse,
+        Self::Fill,
+        Self::CopyWithin,
+        Self::Assign,
+        Self::Delete,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Pop => "pop",
+            Self::Shift => "shift",
+            Self::Unshift => "unshift",
+            Self::Splice => "splice",
+            Self::Sort => "sort",
+            Self::Reverse => "reverse",
+            Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
+            Self::Assign => "assign",
+            Self::Delete => "delete",
+        }
+    }
+    /// The array method of this name that mutates its receiver.
+    pub fn method(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name() == name && !matches!(m, Self::Assign | Self::Delete))
+    }
+}
+
+impl Display for Mutator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mut:{}", self.name())
+    }
+}
+
+impl FromStr for Mutator {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let name = s.strip_prefix("mut:").ok_or_else(|| s.to_string())?;
+        Self::ALL.into_iter().find(|m| m.name() == name).ok_or_else(|| s.into())
     }
 }
 

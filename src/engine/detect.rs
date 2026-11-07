@@ -1,6 +1,6 @@
 //! Witness detection: which flows swallow a read that may be missing.
 use super::analysis::{Const, Graph, decided};
-use crate::core::{Core, Family, Kind};
+use crate::core::{Core, Family, Kind, Mutator};
 use egg::{Id, Language, Symbol};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -88,6 +88,7 @@ fn visit(g: &Graph, ctx: &Context, id: Id, n: &Core, found: &mut Findings) {
         Core::Map([f, _]) | Core::Filter([f, _]) | Core::Every([f, _]) | Core::Some([f, _]) | Core::Fold([f, _, _]) => {
             found.opaque |= !g[*f].nodes.iter().any(|n| matches!(n, Core::Lam(_)));
         }
+        Core::Sort([f, _]) => found.opaque |= !g[*f].nodes.iter().any(|n| matches!(n, Core::Lam(_) | Core::Undef)),
         _ => {}
     }
 }
@@ -284,6 +285,69 @@ fn certain(g: &Graph, z: Id) -> bool {
                 | Core::Lin(_) | Core::Mul(_) | Core::Le(_) | Core::Lt(_) | Core::Not(_) | Core::And(_) | Core::Or(_) | Core::Eq(_)
                 | Core::Concat(_) | Core::Text(_) | Core::Dyn(_) | Core::Cons(_) | Core::Append(_) | Core::Slice(_) | Core::Len(_)
                 | Core::Map(_) | Core::Filter(_) | Core::Every(_) | Core::Some(_) | Core::Join(_) | Core::Flat(_)
+                | Core::Sort(_) | Core::Reverse(_)
         ),
+    })
+}
+
+/// The live mutations in an effect log: those of arrays someone outside the expression holds,
+/// and whether any reaches an array of unknown holder.
+#[derive(Default)]
+pub struct Mutations {
+    pub observable: BTreeSet<Mutator>,
+    pub unknown: bool,
+}
+
+/// Walk the effect log as detection walks a value: decided conditionals and presence tests
+/// prune what cannot happen.
+pub fn mutations(g: &Graph, log: Id) -> Mutations {
+    let mut found = Mutations::default();
+    let mut seen = HashSet::new();
+    let mut stack = vec![log];
+    while let Some(id) = stack.pop() {
+        let id = g.find(id);
+        if !seen.insert(id) || g[id].data.constant.is_some() {
+            continue;
+        }
+        for n in &g[id].nodes {
+            match n {
+                Core::Mutate([op, owner]) => {
+                    let (external, unknown) = holders(g, *owner);
+                    if external && let Some(m) = mutator(g, *op) {
+                        found.observable.insert(m);
+                    }
+                    found.unknown |= unknown;
+                }
+                n => stack.extend(live(g, n)),
+            }
+        }
+    }
+    found
+}
+
+/// Whether an owner term reaches someone outside, and whether it reaches an unknown holder.
+fn holders(g: &Graph, owner: Id) -> (bool, bool) {
+    let (mut external, mut unknown) = (false, false);
+    let mut seen = HashSet::new();
+    let mut stack = vec![owner];
+    while let Some(id) = stack.pop() {
+        let id = g.find(id);
+        if !seen.insert(id) {
+            continue;
+        }
+        let class = &g[id];
+        external |= class.nodes.iter().any(|n| matches!(n, Core::External));
+        unknown |= class.nodes.iter().any(|n| matches!(n, Core::Unowned));
+        for n in class.nodes.iter().filter(|n| matches!(n, Core::If(_))) {
+            stack.extend(live(g, n));
+        }
+    }
+    (external, unknown)
+}
+
+fn mutator(g: &Graph, op: Id) -> Option<Mutator> {
+    g[op].nodes.iter().find_map(|n| match n {
+        Core::Op(m) => Some(*m),
+        _ => None,
     })
 }

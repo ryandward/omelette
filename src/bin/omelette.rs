@@ -1,5 +1,5 @@
 //! Command-line probe: `omelette '<expr>' [--all]` or `omelette --joint '<a>' '<b>' ...`.
-use omelette::engine::{Evaluation, evaluate, evaluate_joint, initialize};
+use omelette::engine::{Evaluation, Mutation, evaluate, evaluate_joint, initialize};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -42,6 +42,13 @@ fn print(r: &Evaluation, all: bool) {
         println!("verdict: {}", r.verdict);
     } else {
         println!("verdict: {} ({})", r.verdict, families.join(", "));
+    }
+    match &r.mutation {
+        Mutation::Observable(ops) => {
+            let names: Vec<&str> = ops.iter().map(|m| m.name()).collect();
+            println!("mutation: {} ({})", r.mutation, names.join(", "));
+        }
+        m => println!("mutation: {m}"),
     }
     if all {
         for c in r.graph.classes() {
