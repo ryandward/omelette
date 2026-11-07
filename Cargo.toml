@@ -9,5 +9,25 @@ egg = "0.11"
 oxc_allocator = "0.157"
 oxc_ast = "0.157"
 oxc_parser = "0.157"
+oxc_semantic = "0.157"
 oxc_span = "0.157"
 oxc_syntax = "0.157"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_imports = "deny"
+dead_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+# Thresholds live in clippy.toml: cognitive complexity 15, 60 lines, 5 arguments.
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+too_many_arguments = "deny"
+match_same_arms = "deny"
+branches_sharing_code = "deny"
+wildcard_imports = "deny"
+needless_pass_by_value = "deny"
+redundant_closure_for_method_calls = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
