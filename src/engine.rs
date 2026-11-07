@@ -28,6 +28,8 @@ pub struct Data {
     pub callable: bool,
     /// Every representation contains unsupported syntax or an unresolved call.
     pub opaque: bool,
+    /// The value may be undefined because a read may be missing.
+    pub partial: bool,
 }
 #[derive(Default)]
 pub struct Facts;
@@ -251,9 +253,25 @@ impl Analysis<SymbolLang> for Facts {
             // The model passes two arguments; a third parameter reads one it does not supply.
             d.callable = d.params <= 2 && !g[body].data.opaque;
         }
+        d.partial = !d.defined
+            && match op(n) {
+                "IndexQ" | "Undef" => true,
+                "If" => c(1).partial || c(2).partial,
+                "Maybe" => c(0).partial && c(1).partial,
+                _ => false,
+            };
+        // A missing read reaching an operation the model does not evaluate on undefined
+        // (arithmetic, ordering, concatenation, a list operation, a length) leaves the
+        // result unknown until a rule distributes the operation over the presence test.
+        let absorbs = match op(n) {
+            "If" | "Maybe" | "Lam" | "Var" => true,
+            "Cons" => !c(1).partial,
+            _ => false,
+        };
         d.opaque = SYNTAX.contains(&op(n))
             || (HIGHER_ORDER.contains(&op(n)) && !c(0).callable)
-            || k.iter().any(|&id| g[id].data.opaque);
+            || k.iter().any(|&id| g[id].data.opaque)
+            || (!absorbs && k.iter().any(|&id| g[id].data.partial));
         d
     }
     fn merge(&mut self, a: &mut Data, b: Data) -> DidMerge {
@@ -277,6 +295,8 @@ impl Analysis<SymbolLang> for Facts {
         a.params = a.params.max(b.params);
         a.callable |= b.callable;
         a.opaque &= b.opaque;
+        // A possible missing read in any representation stays possible until proven defined.
+        a.partial = (a.partial || b.partial) && !a.defined;
         DidMerge(*a != old, *a != b)
     }
     fn modify(g: &mut Graph, id: Id) {
