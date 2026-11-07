@@ -92,11 +92,15 @@ impl<'a> Lowerer<'a, '_> {
                 let value = self.coalesce(value, Arm::Expr(&p.right));
                 self.bind(&p.left, value)
             }
-            BindingPattern::ArrayPattern(p) if p.rest.is_none() => p.elements.iter().enumerate().all(|(k, e)| {
-                let index = Val::int(i64::try_from(k).unwrap_or(i64::MAX));
-                let item = self.read(value.clone(), index);
-                e.as_ref().is_none_or(|e| self.bind(e, item))
-            }),
+            // Destructuring iterates, so a string yields its code points.
+            BindingPattern::ArrayPattern(p) if p.rest.is_none() => {
+                let items = self.lift(value, Family::Propagate, &mut |l, v| l.iterate(v));
+                p.elements.iter().enumerate().all(|(k, e)| {
+                    let index = Val::int(i64::try_from(k).unwrap_or(i64::MAX));
+                    let item = self.read(items.clone(), index);
+                    e.as_ref().is_none_or(|e| self.bind(e, item))
+                })
+            }
             _ => false,
         }
     }

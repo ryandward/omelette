@@ -235,8 +235,11 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         };
         out
     }
-    /// `test ? yes : no` for a symbolic boolean test, pushed inside any splits.
+    /// `test ? yes : no` for a boolean test, pushed inside any splits when it is symbolic.
     pub fn select(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
+        if let Val::Bool(b) = test {
+            return if *b { yes } else { no };
+        }
         self.lift2(yes, no, Family::Default, &mut |l, y, n| l.choose(test, &y, &n))
     }
     fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>) -> Val<'a> {

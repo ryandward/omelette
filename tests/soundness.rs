@@ -282,3 +282,10 @@ fn reads_a_walker_keeps_in_range_are_present() {
     }
     cheat("ys.map((y) => xs[0] ?? 0)", &[Family::Default]);
 }
+
+#[test]
+fn destructuring_iterates_code_points() {
+    value("(([a]) => a)('\u{1F600}').length", "2");
+    value("(([a, b]) => b)('ab')", "utf16:0062");
+    value("(([a]) => a)(undefined)", "throw");
+}
