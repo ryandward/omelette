@@ -1,0 +1,26 @@
+widths.slice(i, i + 1).reduce((_, x) => x, 0)
+[...widths.slice(i, i + 1), 0][0]
+widths.slice(i, i + 1).reduce((acc, x) => x + (acc - acc), 0)
+widths.slice(i, i + 1).reduce((a, b) => a + b, 0)
+[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]
+widths[i] !== undefined ? widths[i] : 0
+widths[i] === undefined ? 0 : widths[i]
+(([x = 0]) => x)(widths.slice(i, i + 1))
+[0, ...xs][xs.length]
+xs.at(-1) ?? 0
+xs.reduce((_, x) => x, 0)
+xs.length ? xs[xs.length - 1] : 0
+[0, ...xs].reduce((_, x) => x)
+widths.slice(i, j).reduce((_, x) => x, 0)
+((somefn) => somefn() ?? 0)(() => widths[i])
+widths.slice(i, i + 2).reduce((a, b) => a + b, 0)
+widths.reduce((a, b) => a + b, 0)
+widths.reduce((a, b) => a + b, 0) + widths.length
+widths.reduce((a, b) => a + b, 0) - widths.length
+xs.map((x) => x + 1)
+xs.filter((x) => x > 0)
+xs.filter((_, k) => k === 0)[0]
+widths[i] !== undefined ? widths[i] : undefined
+((somefn) => somefn() ?? 0)(() => widths.length)
+somefn() ?? 0
+xs.foo(1)

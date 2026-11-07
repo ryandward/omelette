@@ -2,28 +2,30 @@
 
 This is an equality-saturation probe for absence laundering in TypeScript. Laundering is a total-typed expression that quietly turns a missing value into a default, such as `widths.slice(i, i + 1).reduce((_, x) => x, 0)`. The type checker sees `number` and has nothing to say. omelette tries to prove that the reader decomposes into `maybe(default, index?(xs, k))`, an absent read eliminated with a value the program wrote.
 
-The pipeline has two parts:
+The pipeline has a frontend and two engines that run the same semantics:
 
 - `frontend/dump.ts` lowers one TS expression to an S-expression. It works on syntax only and gives no node a meaning.
-- `src/main.rs` saturates that S-expression with [egg](https://github.com/egraphs-good/egg) and runs the cheat query.
+- `src/rules.egg` and `src/bin/omelette.rs` are the [egglog](https://github.com/egraphs-good/egglog) engine, the main one. The rules give `slice`, `reduce`, `filter`, `??`, destructuring defaults and the rest their ECMAScript meaning. The driver declares the constructors, generates the free-variable, depth and let-substitution rules that are the same for every constructor, runs to saturation, and reads the e-graph back for the query.
+- `src/bin/egg-gate.rs` is the earlier [egg](https://github.com/egraphs-good/egg) engine. It's kept as a reference, so any verdict that differs between the two points at a porting mistake.
 
-The rewrites carry the ECMAScript meaning of `slice`, `reduce`, `filter`, `??`, destructuring defaults and the rest. One e-class analysis tracks four things for each class: free variables, constants, integer intervals and an affine normal form for arithmetic. Because of that analysis, there are no commutativity or associativity rewrites.
+In the egglog engine, intervals (`lo`/`hi`, merged by max/min) and free variables (merged by set intersection) are functions with lattice merges. Integer arithmetic gets one affine normal form per class, `Lin(form)`, where the form is a multiset of atoms. Equal sums build the same `Lin` node and hash-consing merges them, so there are no commutativity or associativity rewrites.
 
 ## Run
 
 ```
 cargo build --release
-./target/release/egg-gate                                # the default cases
-./target/release/egg-gate '<expr>' ['<expr>' ...]        # one run per expression
-./target/release/egg-gate '<expr>' --all                 # print every e-class reachable from the root
-./target/release/egg-gate --joint '<expr>' '<expr>' ...  # one e-graph; shows which roots share a class
+./target/release/omelette                                # the default cases
+./target/release/omelette '<expr>' ['<expr>' ...]        # one run per expression
+./target/release/omelette '<expr>' --all                 # print every e-class reachable from the root
+./target/release/omelette --joint '<expr>' '<expr>' ...  # one e-graph; shows which roots share a class
+./scripts/compare.sh                                     # every case in tests/cases.txt, both engines
 ```
 
-The binary needs `node` on your PATH. The dumper loads TypeScript from `~/Git/GenomeHub/node_modules/typescript`, and you can set `TS_PATH` to point it somewhere else.
+`egg-gate` takes the same arguments. The binaries need `node` on your PATH. The dumper loads TypeScript from `~/Git/GenomeHub/node_modules/typescript`, and you can set `TS_PATH` to point it somewhere else. `TRACE=1` prints each egglog iteration with the rules that matched most.
 
 ## Verdicts
 
-- `CHEAT`: some class under the root holds `(maybe z m)`. `m` is an undetermined `index?` read, and `z` is a value the program wrote.
+- `CHEAT`: some class under the root holds `(Maybe z m)`. `m` is an undetermined `IndexQ` read, and `z` is a value the program wrote.
 - `no cheat`: the run saturated, every node under the root has a meaning, and there was no finding.
 - `UNDECIDED`: the run hit a limit, or some form under the root has no rule (an unknown method, an unresolved callee, unsupported syntax).
 
@@ -33,3 +35,4 @@ The binary needs `node` on your PATH. The dumper loads TypeScript from `~/Git/Ge
 - Arrays are dense, records aren't modelled, and only straight-line blocks lower.
 - A `filter` callback gets (element, index), not the array.
 - Callees aren't resolved yet, so `somefn() ?? 0` is UNDECIDED until the dumper inlines the body of `somefn`.
+- Multiplying by a constant only folds when both sides are constants; `2 * i` stays an atom.
