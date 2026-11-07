@@ -1,14 +1,14 @@
 CPU: Intel Core i7-8700K @ 3.70GHz, 6 cores / 12 threads
 OS: Linux x86_64
 Build: cargo release defaults, no target-cpu override
-Protocol: 5 warmups per expression, 500 interleaved samples for each of 73 cases
+Protocol: 5 warmups per expression, 500 interleaved samples for each of 137 cases (73 absence, 64 mutation)
 Command: cargo run --release --example latency -- 500 --check
 Timing: std::time::Instant; fresh parser arena and e-graph on every evaluation
-End-to-end: parse, semantic analysis, lowering, construct graph, saturate, consistency, verdict, extraction, graph disposal
+End-to-end: parse, semantic analysis, lowering, construct graph (value and effect log), saturate, consistency, both verdicts, extraction, graph disposal
 Excluded from steady-state timing: compilation, process startup, runtime initialization, console output
 Initialization: shared rules + parser bootstrap + egg/quanta clock calibration, reported separately
 No CPU pinning, no result cache, no Node.js or tsc
 Threshold checks: per-case p95 parse <50 us, parse/lower <50 us, total <1000 us, nodes <150
 rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)
 cargo 1.99.1 (5f94df478 2026-08-27) (Arch Linux rust 1:1.99.1-1)
-Recorded: 2026-11-07 20:13:53 UTC
+Recorded: 2026-11-07 22:26:37 UTC

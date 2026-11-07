@@ -2,7 +2,9 @@
 
 An in-process Rust probe for absence laundering in JavaScript/TypeScript expressions: information flows by which a read that may be missing is quietly swallowed or conflated with an ordinary value. `names[i] ?? 'unknown'` writes a default; `names[i] !== 'off'` answers `true` when the element is missing; `names.slice(i, i + 1).every((n) => n !== 'off')` answers `true` for the empty list. Each has the form `maybe z f (xs !? k)`: `z` where the read is missing, and `f` of the element where it is present. omelette proves it by finding a witness `maybe(family, z, x. f, read, has)` in an e-graph, where the family names the flow and `has` is the read's presence test.
 
-The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 73 golden cases in [tests/cases.txt](tests/cases.txt) reach saturation with their expected verdicts, and [tests/soundness.rs](tests/soundness.rs) holds the regressions from two soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
+It also reports observable mutation: whether the expression changes, in place, an array or object the caller holds. `xs.sort()` and `groups[i].push(x)` do. `[...xs].sort()` and `(() => { const a = []; a.push(x); return a; })()` mutate only an array they built themselves, which nobody else can see.
+
+The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 73 absence cases in [tests/cases.txt](tests/cases.txt) and the 64 mutation cases in [tests/mutations.txt](tests/mutations.txt) reach saturation with their expected verdicts. [tests/soundness.rs](tests/soundness.rs) and [tests/mutation.rs](tests/mutation.rs) hold the regressions from the soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
 
 ## Run and embed
 
@@ -20,16 +22,17 @@ cargo test --release
 cargo run --release --example latency -- 500 --check
 ```
 
-The command prints the verdict with its families, as in `verdict: CHEAT (sink)`. `--all` dumps every e-class. `--joint` saturates several expressions in one graph and prints the graph's consistency and each expression's class. Each free variable gets one precondition from its uses across all the expressions. In a consistent graph, a shared class proves the expressions equal. `scripts/check.sh` runs the golden cases and fails on a verdict mismatch, a run that did not saturate, or an inconsistent graph. `scripts/differential.js` evaluates closed expressions (one per line) in both omelette and Node. It fails on an inconsistent graph, or where omelette claims a value Node does not produce.
+The command prints the absence verdict with its families, as in `verdict: CHEAT (sink)`, and the mutation verdict with its operations, as in `mutation: MUTATION (sort)`. When lowering evaluated something it does not model, it also prints `opaque: yes`: both verdicts are then `UNDECIDED` unless a cheat or a mutation is found, and the root is the value under the model's assumptions, not a claim about JavaScript's result. `--all` dumps every e-class. `--joint` saturates several expressions in one graph and prints the graph's consistency and each expression's class. Each free variable gets one precondition from its uses across all the expressions. In a consistent graph, a shared class proves the expressions equal. `scripts/check.sh` runs both sets of golden cases and fails on a verdict mismatch, a run that did not saturate, or an inconsistent graph. `scripts/differential.js` evaluates closed expressions (one per line) in both omelette and Node. It fails on an inconsistent graph, a run that fails, or a value omelette claims that Node does not produce; an opaque run claims none.
 
 ```rust
 use omelette::core::Family;
-use omelette::engine::{evaluate, initialize, Verdict};
+use omelette::engine::{evaluate, initialize, Mutation, Verdict};
 
 initialize(); // Once at startup: rules, parser bootstrap, egg's clock calibration.
 let result = evaluate("names[i] ?? 'unknown'").expect("valid expression");
 assert_eq!(result.verdict, Verdict::Cheat);
 assert_eq!(result.families, [Family::Default]);
+assert_eq!(result.mutation, Mutation::None);
 ```
 
 `evaluate` parses, resolves symbols, lowers, saturates a new graph, checks consistency, and extracts a canonical term. Only the rewrite rules are shared between calls; egg's global symbol table also keeps every variable name and string it interns for the life of the process. It runs with a limit of 60 iterations, 10,000 e-nodes, and 50 ms; `evaluate_with_limits` takes a `Limits` value instead. These are cooperative bounds, not a real-time deadline. `parse_time` covers parsing, semantic analysis, and lowering. Setting `TRACE` to any value prints each iteration's graph size, search, apply, and rebuild time, and the rules applied. A syntax error, or source that is not a single expression, returns `Err`.
@@ -75,6 +78,34 @@ These are not cheats:
 
 Where an unknown decides the flow, the verdict is `UNDECIDED`. `names[i] === x` only tests presence when `x` is `undefined`. `xs.slice(i, i + 1).some(p)` does too when `p` always returns `true`, and it is constant when `p` always returns `false`.
 
+## Observable mutation
+
+Checked in this order:
+
+1. `UNDECIDED` if the run did not saturate, or the graph is inconsistent.
+2. `MUTATION` if a mutation that can run reaches an array or object someone outside the expression holds. The operations are reported.
+3. `UNDECIDED` if a mutation that can run reaches an object whose holder is unknown, or lowering evaluated anything it does not model, which may mutate.
+4. `none` otherwise.
+
+| Who holds the mutated array | Examples | Verdict |
+| --- | --- | --- |
+| the caller | `xs.sort()`, `xs.push(1)`, `xs[i] = 0`, `xs.length = 0`, `o.name = 'x'`, `delete xs[i]`, `xs[i]++` | `MUTATION` |
+| the caller, through an element or an alias | `groups[i].push(1)`, `groups.map((g) => g.sort())`, `((a) => a.reverse())(xs)`, `xs.map((x, i, a) => a.pop())` | `MUTATION` |
+| the caller, after an array the expression built escapes into one of theirs | `(() => { const a = []; xs.push(a); a.push(1); return 0; })()` | `MUTATION` |
+| the expression alone | `[...xs].sort()`, `xs.slice().reverse()`, `xs.map((x) => x * 2).sort()`, `(() => { const a = []; a.push(1); return a; })()`, `(() => { const rows = [[], []]; rows[0].push(1); return rows; })()` | `none` |
+| unknown | `f(xs)`, `xs.map(f)`, `xs.forEach((x) => x)`, a `reduce` that mutates its accumulator | `UNDECIDED` |
+
+A mutation counts only where it can run. These mutate nothing:
+- `xs.length >= 0 ? 0 : ys.push(1)`;
+- `xs.filter(() => false).map((x) => ys.push(x))`;
+- `[0, 1].every((x) => x > 0 && xs.push(1))`;
+- `[1].sort((a, b) => (ys.push(1), 0))`, since a comparator runs only on two or more elements;
+- `(xs.length > 0 ? 0 : xs[0].push(1))`, which throws before it can push.
+
+`xs[i] === undefined ? ys.push(1) : 0` mutates `ys` where the read is missing. A local array escapes only where the code that stores it runs.
+
+Every array has an identity once it can be held: bound to a name, put in another array, read from a list lowering recomputes, or made the receiver of a list method. Its aliases share its contents, so a mutation through one is seen through all of them, and values after a mutation are computed from the updated contents: `(xs.length = 0, xs[0] ?? 5)` is `5`. Some values become unknown, and leave the verdicts `UNDECIDED`, rather than risk being stale: an array stored into a symbolic list, an array whose contents a term already holds once it changes, an array that contains itself, and anything an object of unknown holder may be. The model adds two preconditions: distinct free variables are distinct objects, and a free list's elements are distinct from every free variable.
+
 ## Model
 
 The verdicts concern this model, not general JavaScript safety.
@@ -100,26 +131,28 @@ The verdicts concern this model, not general JavaScript safety.
 - **Not modeled**, and `UNDECIDED` unless a witness elsewhere makes the expression a cheat:
   - records and property reads other than `length`, `Map`, optional chaining, and `null`;
   - loose equality, `typeof`, `in`, `instanceof`, `/`, `%`, `**`, bitwise operators, and unary `+`;
-  - mutation, loops, `throw`, `let` and `var`, and statements other than `const`, `if`, blocks, and `return`;
+  - loops, `throw`, `let` and `var`, assignment to a variable, and statements other than `const`, `if`, blocks, expressions, and `return`;
+  - array methods other than those named here, such as `forEach`, `includes`, and `indexOf`;
   - named, async, and generator functions; rest parameters and rest elements; and `arguments`;
   - `flat` beyond depth one, `at` with an index of unknown sign, and `slice` of a literal list with symbolic bounds.
 
 ## Latency
 
-[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 73 cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
+[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 137 cases, the 73 absence cases and then the 64 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 4.0 us |
-| Worst per-case parser + semantic analysis + lowering p95 | 32.1 us |
-| Worst per-case total p95 / p99 | 489.3 / 663.9 us |
-| Largest total among 36,500 samples | 787.8 us |
-| Worst total p95: original / string / every / some cases | 489.3 / 349.4 / 161.5 / 178.7 us |
-| Worst total p95: unknown-callback / join and flat cases | 44.1 / 150.3 us |
-| Two-element slice sum total p50 / p95 | 40.5 / 66.1 us |
+| Worst per-case parser p95 | 4.9 us |
+| Worst per-case parser + semantic analysis + lowering p95 | 32.6 us |
+| Worst per-case total p95 / p99 | 368.3 / 561.1 us |
+| Largest total among 68,500 samples | 676.9 us |
+| Worst total p95: original / string / every / some cases | 368.3 / 274.4 / 135.7 / 144.6 us |
+| Worst total p95: unknown-callback / join and flat cases | 46.5 / 117.2 us |
+| Worst total p95: mutation cases | 255.0 us |
+| Two-element slice sum total p50 / p95 | 43.6 / 49.0 us |
 | All-case graph sizes / iterations | 1-76 / 1-8 |
-| One-time runtime initialization | 818.1 us |
-| First evaluation after initialization | 142.0 us |
+| One-time runtime initialization | 830.6 us |
+| First evaluation after initialization | 187.9 us |
 
 The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
 

@@ -4,12 +4,15 @@
 
 A cheat is an information flow in which a read that may be missing is quietly swallowed or conflated with an ordinary value. The README lists the families: `default`, `unit`, `container`, `sink`, and `drift`. The first four leave a witness of the form `maybe z f (xs !? k)`: `z` where the read is missing, and `f` of the element where it is present. Drift leaves an `escape`: a read whose index came from another collection's walker, left as a possible hole in a mapped result.
 
+The second question is observable mutation: whether the expression changes, in place, an array or object someone outside it holds. Its evidence is a log of `mutate(op, owner)` terms, separate from the value.
+
 ## Pipeline
 
 ```
 source --oxc_parser--> AST --oxc_semantic--> symbols, references, AST nodes
-       --lower (partial evaluation)--> core IR, and whether it evaluated anything opaque
-       --egg (equational saturation)--> classes --> witnesses --> verdict
+       --lower (partial evaluation)--> core IR for the value and for the effect log,
+                                       and whether it evaluated anything opaque
+       --egg (equational saturation of both roots)--> classes --> witnesses, live mutations --> verdicts
 ```
 
 Lowering decides every question of JavaScript's operational semantics: coercion, arity, method dispatch, effects, statement control flow, and which operations are modeled at all. The core IR is a small language with its own meaning, and egg proves equalities in that language only. Some of that meaning mirrors JavaScript where lowering needs it to: `eq` is strict equality, so `NaN` is unequal to itself; `text` is the text `join` writes for an element; and a `read` outside a list's bounds is `undefined`.
@@ -32,7 +35,7 @@ Operations are typed (`ops.rs`):
 
 Every operation lifts over splits: it applies on both sides, each in its own world with the split's read narrowed. A split's family is the last operation that wrote its absent side, with two qualifications. An operation that only passes values through (a read, `length`, a spread) keeps the family it was given. An undecided step, `===` against or `??` toward an unknown, leaves the whole chain undecided, since for some value of the unknown the chain only tests presence. Branches (`expr.rs`) lower each arm in every world of the splits in their test. Presence tests, `&&`, `||`, and `??` all narrow this way, and a binding's value, or a literal list's item, settles to the worlds the enclosing branches decided when it is used. A conditional on a symbolic test that is not a split swallows nothing itself; egg labels it a default if the test proves to be the read's own presence test.
 
-Effects are strict. Array elements, a call's callee or receiver and arguments, `const` initializers, and binary operands are evaluated before what follows: lowering runs what follows on the values as they are, then makes every world in which one of them throws throw. Calling a value that is not a function, or reading a property of `undefined`, throws. Lowering also reports whether it evaluated anything opaque: a construct it does not model, a call it could not resolve, a walker over an unknown callback, or a spread of a value of unknown type. Any of these may throw or loop, so the expression's value is unknown even where its term does not mention them.
+Effects are strict. Array elements, a call's callee or receiver and arguments, `const` initializers, and binary operands are evaluated before what follows: lowering runs what follows on the values as they are, then makes every world in which one of them throws throw. Calling a value that is not a function, or reading a property of `undefined`, throws. Lowering also reports whether it evaluated anything opaque: a construct it does not model, a call it could not resolve, a walker over an unknown callback, or a spread of a value of unknown type. Any of these may throw, loop, or mutate, so the expression's value is unknown even where its term does not mention them, and afterward no array's contents are known.
 
 Calls (`calls.rs`) inline known functions with JavaScript's arity, and run statement lists to their first `return`, so a branch that does not return continues with the statements after it. Array patterns destructure by iteration, so a string yields its code points. Methods dispatch on what lowering knows about the receiver, after the checks JavaScript makes first: a callback that is not a function throws, and `flat` is modeled at depth one, or zero, which copies.
 
@@ -49,6 +52,18 @@ Before falling back to a term, lowering recognizes a filter or find whose predic
 
 `L` is provably no longer than `M` when `M` is `L` itself, or is reached from `L` through `map`, `filter`, `slice`, `append`, or a full copy. A read at any other coordinate derived from a walker's index is marked as drift. When such a read reaches a map's result with its absent side still `undefined`, it is emitted as `escape`.
 
+### References and mutation
+
+An array that can be held has an identity. A free list is an input reference. A fresh array becomes a local reference once it is bound to a name, put in another array, stored by a mutation, or made the receiver of a list method, whose callbacks can reach it. An element lowering recomputes, a mapped list's at an index, has a place reference: one key in every world. A conditional between values that hold references is a choice reference, which owns its alternatives. The store (`refs.rs`) holds each reference's current contents, so aliases share them, and `===` decides identity: a reference equals itself, a local or place differs from everything else, and a choice or two inputs stay unknown. An array with no identity was just built, so nothing else can see it change.
+
+Mutating methods, assignments to elements and properties, `++`, `--`, and `delete` (`mutate.rs`) update the store functionally. A literal list updates exactly: JavaScript's default sort order for known values, and `splice`, `fill`, and `length` with known arguments; an invalid length throws. A symbolic list becomes a `sort` or `reverse` term, a slice for `pop` and `shift`, an append for `push` and `unshift`, or an uninterpreted list. Contents that are a split update in each world, and mutating through a choice updates each alternative where its test picks it. A literal walker reads its receiver as it is at each step, so a callback that changes its array changes the rest of the walk. Reading a mapped element reruns the callback as the map ran it: with the element, its index, and the receiver, against the store when the map ran. Arrays it builds become plain values, and if the callback wrote to arrays that outlive it, the element is unknown.
+
+A term holds a snapshot of every array whose contents it contains, so lowering keeps such snapshots from going stale. A mutation that would store an array into a symbolic list's term instead makes that list's contents unknown, and writing to an array some term already holds makes every array's contents unknown. Mutating an object whose holder is unknown does the same, since it may be one of the store's arrays. Resolving references into a term memoizes each array per emission, and an array that contains itself has no finite term, so it is unknown.
+
+A mutation is logged with its target's owner: `external` for an input, a value of unknown type from the caller, an element of the caller's list, or a local that escaped into one of the caller's; `internal` for an array the expression holds alone, which is not logged; `unowned` otherwise; and an `if` over the alternatives' owners for a choice. An escape records the owner of what the array escaped into, as a term that joins like the log, so an escape in code that cannot run is no escape.
+
+The store, the escapes, and the log follow lowering's worlds. Each fork lowers both alternatives from the same state and joins what they wrote by the split or the symbolic test that separates them. Under a test, contents that hold references join as a choice between copies of each side's, so no reference is resolved against the wrong store. A value that may throw, by a split or by a conditional that picks a throw at any depth, guards the effects of what follows to the worlds where it does not throw, and masks the result there. An operation that consumes a conditional throw without carrying it, such as truthiness, leaves the expression opaque. A callback lowered once for every element leaves what it wrote unknown, and guards what it logged and let escape by its list holding enough elements: one, or two for a comparator or a `reduce` without a seed. A short list's callback runs only where its slot is present and kept. Literal `every`, `some`, and `find` stop at the first deciding element.
+
 A split leaves lowering as `maybe(family, z, x. f, read, has)`, or as the read itself when it is still `undefined` where missing and the element where present. `has(xs, k)` is the read's own presence test: the read's class also holds its value, and a present element that is `undefined` shares that class with every missing read.
 
 ## Core IR: src/core.rs
@@ -62,7 +77,8 @@ A typed `egg::define_language!` enum:
 - walkers over symbolic lists (`map`, `filter`, `every`, `some`, `fold` with bound callbacks; `join` and `flat`);
 - reads that may be missing (`read`), reads proven in range (`at`), and presence tests (`has`);
 - witnesses (`maybe`), their untagged values (`elim`), and drift escapes (`escape`), each with its read's `has`;
-- `dyn`, `dyn?`, and `call`.
+- `dyn`, `dyn?`, and `call`;
+- the values of in-place updates (`sort` with a comparator or `undefined`, and `reverse`), and the effect log's `mutate(op, owner)` with owners `external`, `internal`, and `unowned`.
 
 egg never substitutes into a lambda.
 
@@ -72,13 +88,15 @@ The analysis (`analysis.rs`) tracks known constants and integer bounds. Lengths 
 
 - boolean and conditional identities, and the normal forms `a < b` as `0 <= b - a - 1` and `a <= b` as `0 <= b - a`, with sums kept in canonical order;
 - `read(xs, k)` expands to `if(has(xs, k), at(xs, k), undefined)`, `has(xs, k)` to `0 <= k and k < len(xs)`, and `at(cons(h, t), 0)` is `h`;
-- list identities: lengths of `nil`, `cons`, `append`, `map`, and a conditional; appends of `nil` and `cons`; walkers over `nil`; and a filter whose predicate is `false`;
+- list identities: lengths of `nil`, `cons`, `append`, `map`, a conditional, `sort`, and `reverse`; appends of `nil` and `cons`; walkers, sorts, and reverses of `nil`; a filter whose predicate is `false`; `reverse(reverse(xs)) = xs`; and a default sort of a default sort is the first;
 - `[...a, z][0]` is `maybe(default, z, id, a[0])`, and `[z, ...xs][xs.length]` is `maybe(default, z, id, xs[len - 1])`;
 - presence context: in a witness whose `z`, or the body of whose `f`, is a conditional on its own `has`, that conditional is its else branch in `z` and its then branch in `f`; when the witness was propagating and the else branch is not `undefined`, the program wrote that branch as a default;
 - a witness whose `has` is `false` is its `z`; one whose `has` is `true` is its present branch where that is a constant, and its read where that is the element;
 - every `maybe` implies the untagged `elim` of the same value, so spellings that reach one value through different flows share a class.
 
 Detection (`detect.rs`) walks the classes the root's value depends on. It skips a class with a known constant, a decided conditional's dead arm, a witness's side its decided `has` rules out, and a walker's callback over an empty list. A witness or escape counts only if the root has no representative that avoids its class. Detection judges each class's witnesses together, one group per read. Witnesses in one class over one read denote one value: their replacements agree where the read is missing, and their present branches agree on every element. A proof from one representative therefore holds for the whole group: that the branch does not mention the element, that it is free of unknowns, or that the replacement is certainly a value with no throw in it. A branch that avoids the element only by reading the same free list another way may be reading that element, so it is undecided rather than an observation. A witness whose binder is an `item` stays undecided too, since its branch may vary only at the `undefined` element. The README's verdict section states the conditions.
+
+The effect log is the second root. `mutations` walks it as detection walks a value, skipping decided conditionals, a witness's decided side, and walkers over `nil`. It also carries the conditions of the branches and presence tests it has entered, so a presence test the enclosing branch decides prunes too. It reports each live `mutate` whose owner reaches `external`, and whether any reaches `unowned`.
 
 ## Code shape
 
