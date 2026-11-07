@@ -57,7 +57,7 @@ fn witness(g: &Graph, [flow, z, lam, read]: [Id; 4], found: &mut Findings) {
     };
     if family == Family::Undecided {
         found.possible = true;
-    } else if family.swallows() && !constant_body(g, lam) {
+    } else if family.swallows() && !constant_body(g, lam) && !disjoint(g, z, lam) {
         if certain(g, z) {
             found.families.insert(family);
         } else {
@@ -92,4 +92,14 @@ fn certain(g: &Graph, z: Id) -> bool {
         Core::Undef | Core::Throw | Core::Read(_) | Core::Maybe(_) | Core::If(_) | Core::Call(_) | Core::Unsupported(_) | Core::Fold(_) => false,
         _ => true,
     })
+}
+
+/// The present branch never yields the replacement: a non-empty list against the empty one.
+fn disjoint(g: &Graph, z: Id, lam: Id) -> bool {
+    let empty = g[z].nodes.iter().any(|n| matches!(n, Core::Nil));
+    empty
+        && g[lam].nodes.iter().any(|n| match n {
+            Core::Lam(children) => children.last().is_some_and(|&body| g[body].nodes.iter().any(|n| matches!(n, Core::Cons(_)))),
+            _ => false,
+        })
 }

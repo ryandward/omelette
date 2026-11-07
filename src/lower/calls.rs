@@ -145,6 +145,13 @@ impl<'a> Lowerer<'a, '_> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "map" => Val::List(Rc::new(self.each(items, &f))),
+            "filter" => self.filter_items(items, &f).unwrap_or_else(|| {
+                let id = self.b.emit(&Val::List(items.clone()));
+                self.term_method(id, name, args)
+            }),
+            "find" => self.find_items(items, &f),
+            "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
+            "at" => self.at_items(items, &f),
             "every" | "some" => self.quantify(items, &f, name == "every"),
             "reduce" => self.fold_items(items, &f, args.get(1).cloned()),
             "join" => self.join_items(items, args.first().cloned()),
@@ -203,7 +210,7 @@ impl<'a> Lowerer<'a, '_> {
             Some(v) => self.to_text(v),
         }
     }
-    fn join_items(&mut self, items: &Rc<Vec<Val<'a>>>, sep: Option<Val<'a>>) -> Val<'a> {
+    pub fn join_items(&mut self, items: &Rc<Vec<Val<'a>>>, sep: Option<Val<'a>>) -> Val<'a> {
         let sep = self.separator(sep);
         let mut out: Option<Val<'a>> = None;
         for item in items.iter() {
@@ -337,12 +344,16 @@ impl<'a> Lowerer<'a, '_> {
             Val::Fun(_) => self.callback(kind, f, list),
             other => self.b.emit(other),
         };
-        self.b.add(match kind {
+        let node = self.b.add(match kind {
             Walker::Map => Core::Map([lam, list]),
             Walker::Filter => Core::Filter([lam, list]),
             Walker::Every => Core::Every([lam, list]),
             Walker::Some => Core::Some([lam, list]),
-        })
+        });
+        if kind == Walker::Map && matches!(f, Val::Fun(_)) {
+            self.maps.insert(node, (f.clone(), list));
+        }
+        node
     }
     fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Id) -> Id {
         let (x, i) = (self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));
@@ -458,14 +469,17 @@ impl<'a> Lowerer<'a, '_> {
             Some(Val::Num(f)) => f,
             Some(_) => return self.unsupported(),
         };
+        let open = matches!(end, None | Some(Val::Undef));
         let end = match end {
             None | Some(Val::Undef) => len,
             Some(Val::Num(f)) => f,
             Some(_) => return self.unsupported(),
         };
+        // slice(-k) keeps at most the last k elements.
+        let tail = start.known().filter(|&k| open && k < 0).map(|k| -k);
         let (a, z) = (self.b.form(&start), self.b.form(&end));
         let sliced = self.b.add(Core::Slice([list, a, z]));
-        match end.plus(&start, -1).and_then(|w| w.known()) {
+        match tail.or_else(|| end.plus(&start, -1).and_then(|w| w.known())) {
             Some(w) if w <= 0 => Val::empty(),
             Some(1) => self.short(sliced),
             _ => Val::Term(sliced, Ty::List),
@@ -502,4 +516,47 @@ fn projected<'a>(list: Id, slot: &Val<'a>) -> Val<'a> {
     let Val::Split(s) = slot else { return Val::Term(list, Ty::List) };
     let short = Short { list, read: s.read, var: s.elem, elem: Val::Term(s.elem, Ty::Defined), keep: Val::Bool(true) };
     Val::Short(Rc::new(short))
+}
+
+impl<'a> Lowerer<'a, '_> {
+    /// The kept elements, when every keep decision is known.
+    fn filter_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Option<Val<'a>> {
+        let decisions = self.each(items, f);
+        let mut kept = Vec::new();
+        for (item, decision) in items.iter().zip(decisions) {
+            match self.truthy_split(decision) {
+                Val::Bool(true) => kept.push(item.clone()),
+                Val::Bool(false) => {}
+                _ => return None,
+            }
+        }
+        Some(Val::List(Rc::new(kept)))
+    }
+    /// The first element the callback accepts, or undefined.
+    fn find_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Val<'a> {
+        let decisions = self.each(items, f);
+        items.iter().zip(decisions).rev().fold(Val::Undef, |rest, (item, decision)| {
+            let truth = self.truthy_split(decision);
+            self.branch(truth, Arm::Val(item), Arm::Val(&rest))
+        })
+    }
+    fn at_items(&mut self, items: &Rc<Vec<Val<'a>>>, index: &Val<'a>) -> Val<'a> {
+        let Val::Num(k) = index else { return self.unsupported() };
+        let Some(k) = k.known() else { return self.unsupported() };
+        let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+        let k = if k < 0 { len + k } else { k };
+        usize::try_from(k).ok().and_then(|k| items.get(k).cloned()).unwrap_or(Val::Undef)
+    }
+}
+
+/// `items.slice(start, end)` with JavaScript's relative, clamped bounds.
+fn slice_items<'a>(items: &Rc<Vec<Val<'a>>>, start: Option<&Val<'a>>, end: Option<&Val<'a>>) -> Option<Val<'a>> {
+    let len = i64::try_from(items.len()).ok()?;
+    let bound = |v: Option<&Val<'a>>, default: i64| match v {
+        None | Some(Val::Undef) => Some(default),
+        Some(Val::Num(f)) => f.known().map(|k| if k < 0 { (len + k).max(0) } else { k.min(len) }),
+        Some(_) => None,
+    };
+    let (from, to) = (usize::try_from(bound(start, 0)?).ok()?, usize::try_from(bound(end, len)?).ok()?);
+    Some(Val::List(Rc::new(items.get(from..to.max(from)).unwrap_or(&[]).to_vec())))
 }

@@ -122,7 +122,10 @@ impl<'a> Lowerer<'a, '_> {
             },
             _ => lhs.plus(&rhs, 1),
         };
-        form.map_or_else(|| self.dynamic(op_name(op), &[a, b], Ty::Defined), Val::Num)
+        match form {
+            Some(f) if exact(&f) => Val::Num(f),
+            _ => self.dynamic(op_name(op), &[a, b], Ty::Defined),
+        }
     }
     fn product(&mut self, x: &Form, y: &Form) -> Val<'a> {
         let (x, y) = (self.b.form(x), self.b.form(y));
@@ -221,6 +224,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::NaN => text("NaN"),
             Val::Bool(b) => text(if b { "true" } else { "false" }),
             Val::Num(ref f) if f.known().is_some() => text(&f.constant.to_string()),
+            // A list's text is its elements joined by commas.
+            Val::List(ref items) => self.join_items(items, None),
             _ => self.dynamic("string", &[&v], Ty::Str),
         }
     }
@@ -295,4 +300,10 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
         (Some(x), Some(y)) => x != y,
         _ => false,
     }
+}
+
+/// JavaScript numbers are exact integers only up to 2^53 - 1 in magnitude.
+fn exact(f: &Form) -> bool {
+    const SAFE: i64 = 9_007_199_254_740_991;
+    f.known().is_none_or(|v| v.abs() <= SAFE)
 }

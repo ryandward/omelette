@@ -44,6 +44,9 @@ impl<'a> Lowerer<'a, '_> {
     /// A read of a symbolic list: proven when the index is a walker's own coordinate on its
     /// own receiver, and otherwise split, marked as drift if the index came from a walker.
     pub fn element(&mut self, list: Id, index: &Form) -> Val<'a> {
+        if let Some((f, base)) = self.maps.get(&list).cloned() {
+            return self.mapped(&f, base, list, index);
+        }
         let idx = self.b.form(index);
         if index.single().is_some_and(|i| self.coords.get(&i) == Some(&list)) {
             return Val::Term(self.b.add(Core::At([list, idx])), Ty::Defined);
@@ -51,6 +54,15 @@ impl<'a> Lowerer<'a, '_> {
         let read = self.b.add(Core::Read([list, idx]));
         let drift = index.terms.keys().any(|a| self.coords.contains_key(a));
         self.split_read(read, drift)
+    }
+    /// An element of `base.map(f)`: `f` applied to the element of `base` where present.
+    fn mapped(&mut self, f: &Val<'a>, base: Id, list: Id, index: &Form) -> Val<'a> {
+        let slot = self.element(base, index);
+        let (f, index) = (f.clone(), index.clone());
+        self.worlds(slot, Family::Propagate, &mut |l, x| match x {
+            Val::Undef => Val::Undef,
+            x => l.apply(f.clone(), vec![x, Val::Num(index.clone()), Val::Term(list, Ty::List)]),
+        })
     }
     pub fn split_read(&mut self, read: Id, drift: bool) -> Val<'a> {
         if let Some(v) = self.narrow.get(&read) {

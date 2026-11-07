@@ -90,6 +90,8 @@ pub struct Lowerer<'a, 'l> {
     elems: HashMap<Id, Id>,
     /// Each walker index binder, with the list it ranges over.
     coords: HashMap<Id, Id>,
+    /// Each mapped list, with its callback and the list it maps.
+    maps: HashMap<Id, (Val<'a>, Id)>,
     depth: usize,
 }
 
@@ -103,6 +105,7 @@ impl<'l> Lowerer<'_, 'l> {
             narrow: HashMap::new(),
             elems: HashMap::new(),
             coords: HashMap::new(),
+            maps: HashMap::new(),
             depth: 0,
         }
     }
