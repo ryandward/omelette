@@ -100,6 +100,8 @@ fn make_rules() -> Vec<Rule> {
         rw!("maybe-maybe"; "(Maybe ?z (Maybe ?z ?m))" => "(Maybe ?z ?m)"),
         rw!("maybe-at"; "(Maybe ?z (At ?xs ?k))" => "(At ?xs ?k)"),
         rw!("maybe-num"; "(Maybe ?z (Num ?n))" => "(Num ?n)"),
+        rw!("maybe-str"; "(Maybe ?z (Str ?s))" => "(Str ?s)"),
+        rw!("maybe-concat"; "(Maybe ?z (Concat ?a ?b))" => "(Concat ?a ?b)"),
         rw!("not-true"; "(Not (B true))" => "(B false)"),
         rw!("not-false"; "(Not (B false))" => "(B true)"),
         rw!("eq-mirror-undef"; "(StrictEq Undef ?a)" => "(StrictEq ?a Undef)"),

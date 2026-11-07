@@ -12,6 +12,8 @@ pub struct Data {
     pub lo: Option<i64>,
     pub hi: Option<i64>,
     pub boolean: Option<bool>,
+    pub text: Option<Symbol>,
+    pub string: bool,
     pub integer: bool,
     pub clash: bool,
 }
@@ -71,6 +73,18 @@ impl Analysis<SymbolLang> for Facts {
                 d.boolean = Some(has(g, k[0], "true"));
                 (None, None)
             }
+            "Str" => {
+                d.text = Some(g[k[0]].nodes[0].op);
+                d.string = true;
+                (None, None)
+            }
+            "Concat" => {
+                d.string = true;
+                if let (Some(a), Some(b)) = (g[k[0]].data.text, g[k[1]].data.text) {
+                    d.text = Some(format!("{}{}", a, &b.as_str()["utf16:".len()..]).into());
+                }
+                (None, None)
+            }
             "Len" => (Some(0), None),
             "Rel" => (Some(0), iv(1).1),
             "Add" => (
@@ -125,6 +139,22 @@ impl Analysis<SymbolLang> for Facts {
                 if let (Some(a), Some(b)) = (num(g, k[0]), num(g, k[1])) {
                     d.boolean = Some(a == b);
                 }
+                if op(n) == "StrictEq" {
+                    if let (Some(a), Some(b)) = (g[k[0]].data.text, g[k[1]].data.text) {
+                        d.boolean = Some(a == b);
+                    }
+                    // Strict equality never coerces strings to numbers, booleans,
+                    // or undefined. Handle both orientations without a swap cycle.
+                    for (a, b) in [(k[0], k[1]), (k[1], k[0])] {
+                        if g[a].data.string
+                            && (g[b].data.integer
+                                || g[b].data.boolean.is_some()
+                                || has(g, b, "Undef"))
+                        {
+                            d.boolean = Some(false);
+                        }
+                    }
+                }
                 (None, None)
             }
             _ => {
@@ -161,9 +191,13 @@ impl Analysis<SymbolLang> for Facts {
         a.hi = min_bound(a.hi, b.hi);
         a.clash |= b.clash
             || a.boolean.zip(b.boolean).is_some_and(|(a, b)| a != b)
+            || a.text.zip(b.text).is_some_and(|(a, b)| a != b)
             || a.lo.zip(a.hi).is_some_and(|(l, h)| l > h);
         a.boolean = a.boolean.or(b.boolean);
+        a.text = a.text.or(b.text);
+        a.string |= b.string;
         a.integer |= b.integer;
+        a.clash |= a.string && (a.integer || a.boolean.is_some());
         DidMerge(*a != old, *a != b)
     }
     fn modify(g: &mut Graph, id: Id) {
@@ -178,6 +212,11 @@ impl Analysis<SymbolLang> for Facts {
         if let Some(v) = g[id].data.boolean {
             let a = g.add(SymbolLang::leaf(if v { "true" } else { "false" }));
             let b = g.add(SymbolLang::new("B", vec![a]));
+            g.union(id, b);
+        }
+        if let Some(text) = g[id].data.text {
+            let a = g.add(SymbolLang::leaf(text));
+            let b = g.add(SymbolLang::new("Str", vec![a]));
             g.union(id, b);
         }
     }
@@ -409,7 +448,7 @@ pub fn evaluate_with_limits(
             if op(n) == "Maybe" {
                 let (z, m) = (n.children[0], n.children[1]);
                 if has(&r.egraph, m, "IndexQ")
-                    && !["Undef", "At", "Oob", "Num", "B"]
+                    && !["Undef", "At", "Oob", "Num", "B", "Str", "Concat"]
                         .iter()
                         .any(|o| has(&r.egraph, m, o))
                     && !["Undef", "Oob", "Throw"]
@@ -425,7 +464,9 @@ pub fn evaluate_with_limits(
         !c.data.clash
             && !(has(&r.egraph, c.id, "Nil") && has(&r.egraph, c.id, "Cons"))
             && !(has(&r.egraph, c.id, "Undef")
-                && ["Num", "At"].iter().any(|o| has(&r.egraph, c.id, o)))
+                && ["Num", "At", "Str", "Concat"]
+                    .iter()
+                    .any(|o| has(&r.egraph, c.id, o)))
     });
     let opaque = canonical.as_ref().iter().any(|n| SYNTAX.contains(&op(n)));
     let verdict = if !consistent || !saturated {

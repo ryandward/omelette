@@ -28,3 +28,15 @@ no cheat	((somefn) => somefn() ?? 0)(() => widths.length)
 no cheat	widths.find((_, idx) => idx === i)
 UNDECIDED	somefn() ?? 0
 UNDECIDED	xs.foo(1)
+# String defaults: the same absence elimination, with text as the written value.
+CHEAT	names[i] ?? 'unknown'
+CHEAT	names[i] === undefined ? 'unknown' : names[i]
+CHEAT	names.reduce((_, n) => n, 'unknown')
+CHEAT	names.slice(i, i + 1).reduce((_, n) => n, 'unknown')
+CHEAT	[...names.slice(i, i + 1), 'unknown'][0]
+no cheat	names.filter((n) => n !== 'off')
+no cheat	names[i] !== undefined ? names[i] : undefined
+no cheat	names.map((n) => n + '!')
+no cheat	'a' === 'a'
+no cheat	'a' === 'b'
+no cheat	'a' === undefined

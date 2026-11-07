@@ -5,6 +5,7 @@ use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use oxc_syntax::operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U};
+use std::fmt::Write;
 
 pub fn parse(source: &str) -> Result<RecExpr<SymbolLang>, String> {
     let arena = Allocator::default();
@@ -26,6 +27,17 @@ struct Lower {
 impl Lower {
     fn node(&mut self, op: &str, children: impl Into<Vec<Id>>) -> Id {
         let children = children.into();
+        if matches!(op, "Add" | "Sub" | "Neg" | "Mul" | "Lt" | "Le")
+            && children.iter().any(|&id| self.is_string(id))
+        {
+            // JavaScript + concatenates when either operand is a string. It cannot
+            // share the commutative affine representation used for integer indices.
+            return if op == "Add" {
+                self.intern_node(SymbolLang::new("Concat", children))
+            } else {
+                self.unknown() // String-to-number coercions/order are outside this model.
+            };
+        }
         if matches!(op, "Add" | "Sub" | "Neg" | "Mul") {
             let a = self.form(children[0]);
             let form = if op == "Mul" {
@@ -71,6 +83,16 @@ impl Lower {
             }
         }
         self.intern_node(SymbolLang::new(op, children))
+    }
+    fn is_string(&self, id: Id) -> bool {
+        let n = &self.out[id];
+        match n.op.as_str() {
+            "Str" | "Concat" => true,
+            "Coalesce" | "Default" => n.children.iter().all(|&id| self.is_string(id)),
+            "If" => n.children[1..].iter().all(|&id| self.is_string(id)),
+            "Let" => self.is_string(n.children[2]),
+            _ => false,
+        }
     }
     fn intern_node(&mut self, n: SymbolLang) -> Id {
         if let Some(&id) = self.intern.get(&n) {
@@ -286,6 +308,16 @@ impl Lower {
             Expression::BooleanLiteral(n) => {
                 let b = self.leaf(if n.value { "true" } else { "false" });
                 self.node("B", vec![b])
+            }
+            Expression::StringLiteral(n) => {
+                // Key by decoded UTF-16 code units, including lone surrogates.
+                // Raw spelling and lossy Unicode display are not string identity.
+                let mut value = String::from("utf16:");
+                for unit in n.value.encode_utf16() {
+                    write!(&mut value, "{unit:04x}").unwrap();
+                }
+                let value = self.leaf(&value);
+                self.node("Str", vec![value])
             }
             Expression::Identifier(n) => {
                 if let Some((_, id)) = self.scope.iter().rev().find(|(s, _)| s == n.name.as_str()) {
