@@ -441,15 +441,22 @@ impl<'a> Lowerer<'a, '_> {
         let acc = self.b.fresh(Kind::Acc);
         let unit = init.clone().unwrap_or(Val::Throw);
         let f = f.clone();
+        // Without an initial value, a one-element list returns its element uncalled, so the
+        // law also needs the callback to return its element.
+        let mut returns_element = true;
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
-            x => l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x, Val::Num(final_index.clone()), Val::Term(list, Ty::List)]),
+            x => {
+                let out = l.apply(f.clone(), vec![Val::Term(acc, Ty::Any), x.clone(), Val::Num(final_index.clone()), Val::Term(list, Ty::List)]);
+                returns_element &= out.identical(&x);
+                out
+            }
         });
         let id = self.b.emit(&body);
-        if !self.b.mentions(id, acc) {
-            return body;
+        if self.b.mentions(id, acc) || (init.is_none() && !returns_element) {
+            return self.fold(list, &f, init);
         }
-        self.fold(list, &f, init)
+        body
     }
     fn fold(&mut self, list: Id, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
         let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(Kind::Elem), self.b.fresh(Kind::Index));

@@ -163,7 +163,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef => l.arm(right),
             Val::Term(_, Ty::Any) => {
                 let fallback = l.arm(right);
-                l.dynamic("??", &[&v, &fallback], Ty::Any)
+                let ty = if fallback.defined() { Ty::Defined } else { Ty::Any };
+                l.dynamic("??", &[&v, &fallback], ty)
             }
             v => v,
         })

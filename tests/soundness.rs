@@ -1,4 +1,4 @@
-//! Regressions from the soundness hunt on the previous engine, by root cause.
+//! Regressions from the soundness hunts and the documentation audit, by root cause.
 mod common;
 use common::{checked, cheat, value};
 use omelette::core::Family;
@@ -58,4 +58,46 @@ fn an_index_that_is_not_an_integer_selects_nothing() {
 fn integers_beyond_exact_range_are_not_folded() {
     let r = checked("9007199254740991 + 1 === 9007199254740991 + 2", Verdict::NoCheat);
     assert_ne!(r.canonical.to_string(), "false");
+}
+
+#[test]
+fn coalescing_an_unknown_with_an_unknown_may_be_undefined() {
+    checked("names[i] === undefined ? (x ?? y) : names[i]", Verdict::Undecided);
+    cheat("names[i] === undefined ? (x ?? 0) : names[i]", &[Family::Default]);
+}
+
+#[test]
+fn an_undecided_step_leaves_the_whole_flow_undecided() {
+    // With `x` undefined, the first is `names[i] !== undefined` and the second is `false`.
+    checked("!(names[i] === x)", Verdict::Undecided);
+    checked("(names[i] + 1) === x", Verdict::Undecided);
+}
+
+#[test]
+fn passing_a_replacement_through_keeps_its_flow() {
+    cheat("[...groups.slice(i, i + 1).flat()]", &[Family::Container]);
+    cheat("groups.slice(i, i + 1).flat().length", &[Family::Container]);
+    cheat("[...groups.slice(i, i + 1).flat(), 1]", &[Family::Container]);
+}
+
+#[test]
+fn witnesses_of_one_value_over_one_read_share_their_present_branch() {
+    // Where the read is present the length is nonzero, so the element is never used.
+    checked("xs.length ? 5 : (xs[xs.length - 1] ?? 0)", Verdict::NoCheat);
+}
+
+#[test]
+fn reduce_without_an_initial_value_returns_a_lone_element_uncalled() {
+    value("[3].reduce((_, x) => 7)", "3");
+    value("[3, 4].reduce((_, x) => 7)", "7");
+    let r = checked("xs.reduce((_, x) => 7)", Verdict::NoCheat);
+    assert!(r.canonical.to_string().starts_with("(fold "), "{}", r.canonical);
+    value("xs.reduce((_, x) => x)", "(read list:xs (lin -1 1 (len list:xs)))");
+}
+
+#[test]
+fn an_index_inside_parentheses_or_a_type_assertion_is_still_an_index() {
+    for source in ["names[(i)] !== 'off'", "names[i as number] !== 'off'", "names[(i)!] !== 'off'"] {
+        cheat(source, &[Family::Sink]);
+    }
 }

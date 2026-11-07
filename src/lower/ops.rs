@@ -22,22 +22,16 @@ pub type Op<'a, 'l, 'f> = dyn FnMut(&mut Lowerer<'a, 'l>, Val<'a>, Val<'a>) -> V
 pub type Op1<'a, 'l, 'f> = dyn FnMut(&mut Lowerer<'a, 'l>, Val<'a>) -> Val<'a> + 'f;
 
 impl<'a, 'l> Lowerer<'a, 'l> {
-    /// Rebuild a split from new sides, recording `family` if this operation changed the
-    /// absent side.
+    /// Rebuild a split from new sides, composing `family` into the split's flow if this
+    /// operation changed the absent side.
     pub fn resplit(&mut self, s: &Split<'a>, absent: Val<'a>, present: Val<'a>, family: Family) -> Val<'a> {
         if absent.is_known() && present.is_known() && same(&absent, &present) == Some(true) {
             return absent;
         }
-        // The flow is the last operation that changed the absent side.
-        let changed = match (&s.absent, &absent) {
-            (old, new) if old.is_known() && new.is_known() => same(old, new) != Some(true),
-            (Val::Throw, Val::Throw) => false,
-            _ => true,
-        };
         let family = match &absent {
             Val::Undef | Val::Throw => Family::Propagate,
-            _ if changed => family,
-            _ => s.family,
+            unchanged if unchanged.identical(&s.absent) => s.family,
+            _ => s.family.then(family),
         };
         let s = Split { absent, present, family, ..s.clone() };
         Val::Split(Rc::new(s))
@@ -243,7 +237,8 @@ impl<'a> Lowerer<'a, '_> {
     pub fn dynamic(&mut self, name: &str, args: &[&Val<'a>], ty: Ty) -> Val<'a> {
         let mut children = vec![self.b.text(Utf16::new(name.encode_utf16()))];
         children.extend(args.iter().map(|v| self.b.emit(v)));
-        Val::Term(self.b.add(Core::Dyn(children.into())), ty)
+        let node = if ty == Ty::Any { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
+        Val::Term(self.b.add(node), ty)
     }
 }
 

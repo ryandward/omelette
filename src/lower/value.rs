@@ -47,7 +47,7 @@ pub struct Split<'a> {
     pub elem: Id,
     pub absent: Val<'a>,
     pub present: Val<'a>,
-    /// The flow that first changed the absent side from undefined.
+    /// The flow that wrote the absent side (see [`Family::then`]).
     pub family: Family,
     /// The read's index came from another collection's walker.
     pub drift: bool,
@@ -85,6 +85,29 @@ impl Val<'_> {
     }
     pub fn empty() -> Self {
         Self::List(Rc::new(Vec::new()))
+    }
+    /// The same lowered value: structural identity, not JavaScript equality, so `NaN` is
+    /// identical to itself and two lists are identical when their items are.
+    pub fn identical(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Undef, Self::Undef) | (Self::NaN, Self::NaN) | (Self::Throw, Self::Throw) => true,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Num(a), Self::Num(b)) => a == b,
+            (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.identical(y)),
+            (Self::Short(a), Self::Short(b)) => Rc::ptr_eq(a, b),
+            (Self::Fun(a), Self::Fun(b)) => Rc::ptr_eq(a, b),
+            (Self::Split(a), Self::Split(b)) => Rc::ptr_eq(a, b),
+            (Self::Term(a, _), Self::Term(b, _)) => a == b,
+            _ => false,
+        }
+    }
+    /// Whether this value is never undefined.
+    pub fn defined(&self) -> bool {
+        match self {
+            Self::Undef | Self::Throw | Self::Split(_) | Self::Term(_, Ty::Any) => false,
+            Self::NaN | Self::Bool(_) | Self::Num(_) | Self::Str(_) | Self::List(_) | Self::Short(_) | Self::Fun(_) | Self::Term(..) => true,
+        }
     }
     /// Whether this is a known value lowering can compute with.
     pub fn is_known(&self) -> bool {

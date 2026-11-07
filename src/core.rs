@@ -29,8 +29,10 @@ define_language! {
         "concat" = Concat([Id; 2]),
         // The text join writes for an element.
         "text" = Text(Id),
-        // An operation lowering resolved to no known type; never undefined.
+        // An operation lowering resolved to no known type: never undefined, and its
+        // possibly undefined counterpart (`??` of an unknown with an unknown fallback).
         "dyn" = Dyn(Box<[Id]>),
+        "dyn?" = DynUndef(Box<[Id]>),
         "cons" = Cons([Id; 2]),
         "append" = Append([Id; 2]),
         "slice" = Slice([Id; 3]),
@@ -149,6 +151,19 @@ impl Family {
     /// Whether this flow swallows or conflates the absent value.
     pub fn swallows(self) -> bool {
         matches!(self, Self::Default | Self::Unit | Self::Container | Self::Sink | Self::Drift)
+    }
+    /// The flow after `next` changes an absent side this flow produced. The last operation
+    /// that wrote the replacement names it; an operation that only passes values through
+    /// (`propagate`: a read, `length`, a spread) keeps the flow it was given; and one
+    /// undecided step leaves the whole chain undecided, since its unknown operand may make
+    /// the chain an observation.
+    #[must_use]
+    pub fn then(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::Undecided, _) | (_, Self::Undecided) => Self::Undecided,
+            (flow, Self::Propagate) => flow,
+            (_, next) => next,
+        }
     }
 }
 

@@ -27,6 +27,11 @@ pub fn classify(semantic: &Semantic<'_>, kinds: &mut HashMap<String, Kind>) {
 
 fn role(semantic: &Semantic<'_>, node: NodeId) -> Option<Kind> {
     let nodes = semantic.nodes();
+    // The use is the nearest ancestor that is not parentheses or a type assertion.
+    let mut node = node;
+    while transparent(nodes.parent_kind(node)) {
+        node = nodes.parent_id(node);
+    }
     let me = nodes.get_node(node).span();
     match nodes.parent_kind(node) {
         AstKind::ComputedMemberExpression(m) => {
@@ -39,6 +44,17 @@ fn role(semantic: &Semantic<'_>, node: NodeId) -> Option<Kind> {
         AstKind::CallExpression(c) => call_role(c, me),
         _ => None,
     }
+}
+
+/// Wrappers lowering looks through, as it does when it lowers them.
+fn transparent(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::ParenthesizedExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSSatisfiesExpression(_)
+            | AstKind::TSNonNullExpression(_)
+    )
 }
 
 fn numeric_operator(b: &BinaryExpression<'_>) -> bool {
