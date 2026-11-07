@@ -596,31 +596,45 @@ pub fn evaluate_with_limits(
     let canonical = Extractor::new(&r.egraph, Cost(&r.egraph)).find_best(root).1;
     let mut seen = HashSet::new();
     let mut stack = vec![root];
-    let mut hit = false;
+    // A witness Maybe(z, read) over an undetermined read is a cheat when z replaces the
+    // absence for certain: z is a known constant, or the read is the element itself (f = id)
+    // and z is proven defined. Any other z that is not absent leaves the answer to inputs.
+    let g = &r.egraph;
+    let constant = |id: Id| {
+        let d = &g[id].data;
+        num(g, id).is_some() || d.boolean.is_some() || d.text.is_some() || has(g, id, "Nil")
+    };
+    let (mut hit, mut possible) = (false, false);
     while let Some(id) = stack.pop() {
-        let id = r.egraph.find(id);
+        let id = g.find(id);
         if !seen.insert(id) {
             continue;
         }
         // A class with a reduced representation is that value. An unreduced binding or
         // application beside it describes the function before its argument, not this value.
-        let reduced = !r.egraph[id].data.opaque;
-        for n in &r.egraph[id].nodes {
+        let reduced = !g[id].data.opaque;
+        for n in &g[id].nodes {
             if !(reduced && SYNTAX.contains(&op(n))) {
                 stack.extend(&n.children);
             }
-            if op(n) == "Maybe" {
-                let (z, m) = (n.children[0], n.children[1]);
-                // An undetermined read: not proven present (At), absent, or defined.
-                if has(&r.egraph, m, "IndexQ")
-                    && !r.egraph[m].data.defined
-                    && !["Undef", "At", "Oob"].iter().any(|o| has(&r.egraph, m, o))
-                    && !["Undef", "Oob", "Throw"]
-                        .iter()
-                        .any(|o| has(&r.egraph, z, o))
-                {
-                    hit = true;
-                }
+            if op(n) != "Maybe" {
+                continue;
+            }
+            let (z, m) = (n.children[0], n.children[1]);
+            // An undetermined read: not proven present (At), absent, or defined.
+            let partial = has(g, m, "IndexQ")
+                && !g[m].data.defined
+                && !["Undef", "At", "Oob"].iter().any(|o| has(g, m, o));
+            if !partial || ["Undef", "Oob", "Throw"].iter().any(|o| has(g, z, o)) {
+                continue;
+            }
+            let mapped = g[m].nodes.iter().any(|q| {
+                op(q) == "IndexQ" && has(g, q.children[0], "Map")
+            });
+            if constant(z) || (!mapped && g[z].data.defined) {
+                hit = true;
+            } else {
+                possible = true;
             }
         }
     }
@@ -634,7 +648,7 @@ pub fn evaluate_with_limits(
         Verdict::Undecided
     } else if hit {
         Verdict::Cheat
-    } else if opaque {
+    } else if possible || opaque {
         Verdict::Undecided
     } else {
         Verdict::NoCheat
