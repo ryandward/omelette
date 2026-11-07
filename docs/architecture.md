@@ -1,68 +1,70 @@
 # Architecture
 
-This is the target design for the rewrite in progress. The README describes what ships.
-
 ## The question
 
-A cheat is an information flow in which a possibly missing read, written here as the absent value, is quietly swallowed or conflated with an ordinary value. The engine looks for these families:
-
-| Family | The absent value becomes | Examples |
-| --- | --- | --- |
-| Default | a value the program wrote | `xs[i] ?? 0`, `xs[i] === undefined ? 0 : xs[i]`, `names[i] \|\| 'x'` |
-| Unit absorption | the unit of a fold's monoid | `xs.slice(i, i + 1).every(p)`, `.some(p)`, `.join('')`, `.reduce(f, z)`, `.filter(p).length` |
-| Container conflation | an empty collection | `groups.slice(i, i + 1).flat()`, `.flatMap(f)` |
-| Coercion sink | whatever an operator makes of `undefined` | `names[i] === 'on'`, `widths[i] < 3`, `widths[i] + 1`, `names[i] + '!'`, `!names[i]` |
-| Coordinate drift | a hole in a collection shaped like another | `users.map((_, i) => roles[i])`, `names.map((n, i) => names[i + 1])` |
-
-Not cheats: the absence reaches the result unchanged (`names[i]`), stays visible in a container (`names.slice(i, i + 1).map(f)`), is observed rather than replaced (`names[i] === undefined`, or a present branch that ignores the element), the read throws instead of continuing (`names[i].length`), or the index is proven in range (`names.map((n, i) => names[i])`).
+A cheat is an information flow in which a read that may be missing is quietly swallowed or conflated with an ordinary value. The families are listed in the README: `default`, `unit`, `container`, `sink`, and `drift`. Every one is a witness of the form `maybe z f (xs !? k)`: `z` where the read is missing, and `f` of the element where it is present.
 
 ## Pipeline
 
 ```
-source --oxc_parser--> AST --oxc_semantic--> symbols and references
-       --lower (partial evaluation, JavaScript semantics)--> Core IR
-       --egg (equational saturation, no runtime semantics)--> witnesses --> verdict
+source --oxc_parser--> AST --oxc_semantic--> symbols, references, AST nodes
+       --lower (partial evaluation, all JavaScript semantics)--> core IR
+       --egg (equational saturation, no JavaScript semantics)--> classes --> witnesses --> verdict
 ```
 
-### Lowering: all of JavaScript's operational semantics
+The boundary is hard: lowering decides every question of JavaScript's operational semantics, and egg only proves equalities between core terms.
 
-Lowering is a partial evaluator over a static value domain:
+## Lowering: src/lower
 
-- **Known values**: integers, `NaN`, strings, booleans, `undefined`, lists of known length, and functions (parameters, body, captured environment).
-- **Symbolic values**: a Core IR term with a static type (integer, string, boolean, list, or unknown, each marked defined or possibly undefined).
-- **Splits**: a value that depends on whether one read is present. A read `xs[k]` not known to be in range lowers to a split whose absent side is `undefined` and whose present side is a fresh element variable `x`.
+A partial evaluator over a static value domain (`value.rs`):
 
-Operations evaluate on known values and build terms on symbolic ones. On a split, an operation applies to both sides: `widths[i] + 1` is a split whose absent side is `NaN` and whose present side is `x + 1`. Conditionals on a split lower each branch in both worlds, so narrowing falls out: in `names[i] !== undefined ? names[i] + '!' : 'none'`, the present world sees `x + '!'` and the absent world sees `'none'`. When a split leaves lowering, it becomes `Maybe(family, z, x. f, read)`. The family records the operation that first turned the absent side into a non-`undefined` value.
+- **Known values**: integers (affine forms with no atoms), `NaN`, strings as UTF-16 code units, booleans, `undefined`, lists of known length, and functions (parameters, body, and the bindings they closed over).
+- **Symbolic values**: a core term with a static type: integer (an affine form over atoms), boolean, string, list, defined, or possibly undefined.
+- **Splits**: a value that depends on whether one read is present. A read of a symbolic list at an index not proven in range lowers to a split whose absent side is `undefined` and whose present side is the read's element binder. Every split on one read shares one binder.
+- **Short lists**: a symbolic list of at most one element (a slice whose bounds differ by one, or a filter that keeps exactly `list[j]`), with its element slot, the element's value, and whether a filter keeps it.
 
-Lowering owns, and egg never sees:
+Operations are typed (`ops.rs`): integer arithmetic stays affine, string `+` concatenates, ordering on `undefined` is `false`, and anything of unknown type becomes an uninterpreted `dyn` term that is never `undefined`. Every operation lifts over splits: it applies on both sides, and a split records as its family the last operation that changed its absent side. Branches (`expr.rs`) lower each arm in every world of the splits in their test, with the split's read narrowed to missing or to its element. Presence tests, `&&`, `||`, and `??` all narrow this way.
 
-- symbol identity and scope, through `oxc_semantic`;
-- inlining of known functions with JavaScript arity: missing arguments are `undefined`, and walkers pass (element, index, array) and `reduce` passes (accumulator, element, index, array);
-- unrolling literal lists of known length;
-- typed operator dispatch: integer `+` is affine, string `+` is concatenation, and anything else is an uninterpreted operation that is never `undefined`;
-- what each operator makes of `undefined` (the sinks);
-- the provenance of walker indexes, for proving `names[i]` present inside `names.map` and for flagging drift;
-- the preconditions on free variables: one used as an index, a bound, or an arithmetic operand is an integer, one used as a list is a dense list of defined elements, and any other is unknown and possibly undefined.
+Calls (`calls.rs`) inline known functions with JavaScript's arity, and run statement lists to their first `return`, so a branch that does not return continues with the statements after it. Methods dispatch on what lowering knows about the receiver:
 
-Unsupported syntax lowers to an `Unsupported` term, and unknown functions to an opaque `Call`.
+- a literal list unrolls (`map`, `filter`, `find`, `every`, `some`, `reduce`, `join`, `flat`, `flatMap`, `slice`, `at`, `concat`);
+- a short list yields a split whose absent side is the method's unit: `true` for `every`, `false` for `some`, `''` for `join`, `[]` for `flat`, the initial value for `reduce`, and `0` for a filtered count;
+- a symbolic list yields a walker term whose callback is lowered once with fresh element and index binders.
 
-### Core IR
+Before falling back to a walker term, lowering recognizes a filter or find whose predicate is `index === j` with `j` an integer (a projection), and a `reduce` whose callback ignores its accumulator (the last element). Reading a mapped list applies its callback to the underlying read.
 
-A typed `egg::define_language!` enum. Integer arithmetic is affine and canonical. There are strings, booleans, lists (`Nil`, `Cons`, `Append`, `Slice`, `Len`), walkers over symbolic lists with bound bodies (`Map`, `Filter`, `Fold`, `Every`, `Some`, `Join`, `Flat`), reads `Read(xs, k)`, witnesses `Maybe(family, z, x. f, read)`, and drift escapes `Escape(read)`. egg performs no substitution.
+`oxc_semantic` provides symbol identity for inlining and for recognizing a projection's index parameter, and `usage.rs` uses its node tree to give each free variable its precondition. A walker's index binder records the list it ranges over: reading that list at that binder is proven in range, and reading anything else at a coordinate derived from it is marked as drift. When a drift read reaches a map's result unreplaced, it is emitted as `escape`.
 
-### egg: equational laws only
+A split leaves lowering as `maybe(family, z, x. f, read)`, or as the read itself when nothing happened to it. When the present side does not mention the element, the family becomes `observe`.
 
-- **Affine integer arithmetic** and interval bounds, so presence conditions can be compared.
-- **Short lists**: a slice whose bounds differ by one has length at most one. A walker over a list `L` of length at most one is a witness over `Read(L, 0)` with the walker's unit: `Every` gives `true`, `Some` gives `false`, `Join` gives `''`, `Flat` gives `[]`, `Fold` gives the initial value, and a filter's length gives 0.
-- **Presence context**: inside `Maybe(fam, z, x. f, r)`, a condition equivalent to `r` being present is `true` in `f` and `false` in `z`. This decides `xs.length ? xs[xs.length - 1] : 0`.
-- **Projection**: a filter or find whose predicate is `index === j`, with `j` an integer, selects `Read(xs, j)`.
+## Core IR: src/core.rs
 
-### Verdict
+A typed `egg::define_language!` enum:
 
-- A witness `Maybe(fam, z, x. f, r)` is a cheat of family `fam` when `r` is not proven present, `z` is not `undefined` and not a throw, `f` is not constant, and `z` is certain. A `z` that may itself be `undefined` makes the verdict UNDECIDED.
-- `Escape(r)` with `r` not proven present is coordinate drift.
-- With no cheat found, `Unsupported` or an opaque `Call` reaching the root makes the verdict UNDECIDED. Otherwise it is `no cheat`.
+- constants;
+- canonical affine sums (`lin`), integer order (`le`, `lt`), and booleans;
+- strings (`concat`, and `text`, the text `join` writes for an element);
+- lists (`nil`, `cons`, `append`, `slice`, `len`);
+- walkers over symbolic lists with bound callbacks (`map`, `filter`, `every`, `some`, `fold`, `join`, `flat`);
+- reads that may be missing (`read`) and reads proven in range (`at`);
+- witnesses (`maybe`), their untagged values (`elim`), and drift escapes (`escape`);
+- `dyn`, `call`, and `unsupported`.
+
+egg never substitutes.
+
+## egg: src/engine
+
+The analysis tracks only known constants and integer bounds (lengths are non-negative, a walker index is non-negative, and a slice holds at most its bound difference). The rules (`rules.rs`) are:
+
+- boolean and conditional identities, and the normal forms `a < b` as `0 <= b - a - 1` and `a <= b` as `0 <= b - a`, with sums kept in canonical order;
+- `read(xs, k)` expands to `if(0 <= k and k < len(xs), at(xs, k), undefined)`;
+- list identities: lengths of `nil`, `cons`, `append`, and `map`, and appends of `nil` and `cons`;
+- `[...a, z][0]` is `maybe(default, z, id, a[0])`, and `[z, ...xs][xs.length]` is `maybe(default, z, id, xs[len - 1])`;
+- presence context: inside `maybe(family, z, x. f, r)`, a condition that is `r`'s presence test is `true` in `f` and `false` in `z`; a witness over a read proven missing is its `z`;
+- every `maybe` implies the untagged `elim` of the same value, so spellings that reach one value through different flows share a class.
+
+Detection (`detect.rs`) walks the classes reachable from the root, as the README's verdict section states.
 
 ## Code shape
 
-`Cargo.toml` and `clippy.toml` enforce pedantic Clippy, no dead code, functions of at most 60 lines, cognitive complexity of at most 15, and at most 5 arguments.
+`Cargo.toml` and `clippy.toml` deny pedantic Clippy findings and dead code, and cap functions at 60 lines, cognitive complexity at 15, and arguments at 5.

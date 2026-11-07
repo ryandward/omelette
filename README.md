@@ -1,8 +1,8 @@
 # omelette
 
-An in-process Rust probe for absence laundering in JavaScript/TypeScript expressions. `names[i] ?? 'unknown'` replaces a possibly absent read with a written value; so does `names.slice(i, i + 1).every((n) => n !== 'off')`, which answers `true` when the element is missing. Both have the form `maybe z f (xs !? k)`: a constant `z` for the missing element, and `f` of the element otherwise. omelette proves the form by finding a witness `Maybe(z, IndexQ(xs, k))`, or `Maybe(z, IndexQ(Map(f, 0, xs), k))` when `f` is not the identity (`Map(f, 0, xs)` maps `f` over `xs` with indexes counted from 0). For `names[i] !== 'off'` the witness reads `names` at `i`; for the slice spelling it reads the one-element slice at `0`.
+An in-process Rust probe for absence laundering in JavaScript/TypeScript expressions: information flows by which a read that may be missing is quietly swallowed or conflated with an ordinary value. `names[i] ?? 'unknown'` writes a default; `names[i] !== 'off'` answers `true` when the element is missing; `names.slice(i, i + 1).every(p)` answers `true` for the empty list. Each has the form `maybe z f (xs !? k)`, and omelette proves it by finding a witness `maybe(family, z, x. f, read)` in an e-graph, where the family names the flow.
 
-The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` for native parsing, all in-process: no Node.js, TypeScript compiler, or subprocess. The 73 golden cases in [tests/cases.txt](tests/cases.txt) all reach saturation with their expected verdicts.
+The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 73 golden cases in [tests/cases.txt](tests/cases.txt) reach saturation with their expected verdicts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
 
 ## Run and embed
 
@@ -12,83 +12,58 @@ The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` fo
 cargo build --release
 ./target/release/omelette "names[i] ?? 'unknown'"
 ./target/release/omelette "names.slice(i, i + 1).every((n) => n !== 'off')"
-./target/release/omelette 'widths.length ?? 0' --all
-./target/release/omelette --joint 'widths.find((_, idx) => idx === i)' 'widths[i]'
+./target/release/omelette 'users.map((_, i) => roles[i])' --all
+./target/release/omelette --joint "names[i] !== 'off'" "names[i] === undefined || names[i] !== 'off'"
 ./scripts/check.sh
+node scripts/differential.js FILE
 cargo test --release
 cargo run --release --example latency -- 500 --check
 ```
 
-`--all` dumps every e-class; `--joint` saturates several expressions in one graph and prints each one's class, so a shared class number means a proven equality. `scripts/check.sh` runs every golden case and fails on a verdict mismatch, a non-saturated run (including expected `UNDECIDED` cases), or an inconsistent graph.
-
-Use the library inside the harness loop:
+The command prints the verdict with its families, as in `verdict: CHEAT (sink)`. `--all` dumps every e-class; `--joint` saturates several expressions in one graph and prints each one's class, so a shared class proves them equal. `scripts/check.sh` runs the golden cases and fails on a verdict mismatch, a run that did not saturate, or an inconsistent graph. `scripts/differential.js` evaluates closed expressions (one per line) in both omelette and Node and fails where omelette claims a value Node does not produce.
 
 ```rust
+use omelette::core::Family;
 use omelette::engine::{evaluate, initialize, Verdict};
 
-initialize(); // Once at harness startup: rules, parser bootstrap, egg's clock calibration.
-let result = evaluate("widths[i] ?? 0").expect("valid expression");
+initialize(); // Once at startup: rules, parser bootstrap, egg's clock calibration.
+let result = evaluate("names[i] ?? 'unknown'").expect("valid expression");
 assert_eq!(result.verdict, Verdict::Cheat);
-assert!(result.saturated && result.consistent);
+assert_eq!(result.families, [Family::Default]);
 ```
 
-`evaluate` parses, lowers, builds a fresh graph, saturates, checks consistency, and extracts a canonical term; nothing is cached between expressions. It runs with a limit of 60 iterations, 10,000 e-nodes, and 50 ms; `evaluate_with_limits` takes those three limits as arguments. They are cooperative bounds, not a real-time deadline. `parse_time` covers parsing and lowering; `total_time` ends before the returned graph is dropped. `TRACE=1` prints, for each iteration, the graph size, search, apply, and rebuild time, and the rules applied. Syntax errors return `Err`.
+`evaluate` parses, resolves symbols, lowers, saturates a fresh graph, checks consistency, and extracts a canonical term; nothing is cached between expressions. It runs with a limit of 60 iterations, 10,000 e-nodes, and 50 ms; `evaluate_with_limits` takes a `Limits` value instead. They are cooperative bounds, not a real-time deadline. `parse_time` covers parsing, semantic analysis, and lowering. `TRACE=1` prints each iteration's graph size, search, apply, and rebuild time, and the rules applied. Syntax errors return `Err`.
 
 ## Verdicts
 
 Checked in this order:
 
-1. `UNDECIDED` if the run did not saturate or the graph is inconsistent: a class with conflicting constants, an empty interval, a string merged with a number or boolean, both `Nil` and `Cons`, or `Undef` beside a value proven defined.
-2. `CHEAT` if a class reachable from the root holds `Maybe(z, m)` where `m` is an `IndexQ` not proven present, absent, or defined, and `z` is not `undefined`, out of bounds, or a throw. In a class that also has a reduced form, the walk does not descend through unsupported syntax such as an unreduced binding or application, so `((xs) => xs[2] ?? 0)([1, 2])` is judged by its value, `0`.
-3. `UNDECIDED` if the root is opaque: every representation of it holds unsupported syntax or an unresolved call.
+1. `UNDECIDED` if the run did not saturate, or the graph is inconsistent: two representations of one class proven different (two constants, or an empty integer interval).
+2. `CHEAT` if a class reachable from the root holds a witness of a swallowing family over a read that is not proven present or missing, whose present branch mentions the element and is not a non-empty list against an empty replacement, and whose replacement `z` is certainly a value; or an `escape` of such a read (drift). The families are reported.
+3. `UNDECIDED` if a witness leaves the answer to unknown inputs (its replacement may itself be `undefined`), or unsupported syntax or an unresolved call reaches the result.
 4. `no cheat` otherwise.
-
-A witness outranks opacity: `xs.map(f)[i] ?? 0` launders a possibly absent read whatever `f` is, while `xs.map(f)` alone is `UNDECIDED`.
 
 ## What counts as a cheat
 
-Each spelling below answers with a constant when the element at `i` is missing. For the list operations over `slice(i, i + 1)`, that constant is the operation's empty-list value, the unit of its monoid.
+| Family | The missing read becomes | Examples |
+| --- | --- | --- |
+| `default` | a value the program wrote | `xs[i] ?? 0`, `xs[i] === undefined ? 0 : xs[i]`, `xs.length ? xs[xs.length - 1] : 0`, `[...a, 0][0]` |
+| `unit` | the unit of a fold's monoid | `xs.slice(i, i + 1).every(p)` (`true`), `.some(p)` (`false`), `.join('')` (`''`), `.filter(p).length` (`0`), `xs.slice(i, j).reduce((_, x) => x, 0)` |
+| `container` | an empty collection | `groups.slice(i, i + 1).flat()`, `.flatMap((g) => g)` |
+| `sink` | what an operator makes of `undefined` | `names[i] === 'on'`, `names[i] !== 'off'`, `widths[i] < 3`, `widths[i] + 1`, `names[i] + '!'`, `` `${names[i]}` ``, `!names[i]` |
+| `drift` | a hole in a collection shaped like another | `users.map((_, i) => roles[i])`, `names.map((n, i) => names[i + 1])` |
 
-| Spelling | Form |
-| --- | --- |
-| `xs[i] ?? z`, `xs.slice(i, i + 1).reduce((_, x) => x, z)` | `maybe z id` |
-| `names[i] !== 'off'`, `names.slice(i, i + 1).every((n) => n !== 'off')` | `maybe true (!== 'off')` |
-| `names[i] === 'on'`, `names.slice(i, i + 1).some((n) => n === 'on')` | `maybe false (=== 'on')` |
-| `names.slice(i, i + 1).filter((n) => n === 'on').length` | `maybe 0 (x -> x === 'on' ? 1 : 0)` |
-| `names.slice(i, i + 1).join(', ')` | `maybe '' text` |
-| `groups.slice(i, i + 1).flat()`, `.flatMap((g) => g)` | `maybe [] spread` |
+These are not cheats: the read reaches the result unchanged (`names[i]`, `names[i] && names[i] !== 'off'`); it stays visible in a container (`names.slice(i, i + 1).map(f)`, `names[i] !== undefined ? [names[i]] : []`); its absence is observed rather than replaced (`names[i] === undefined`, `names.filter((_, k) => k === i).length === 0`, or a present branch that ignores the element); it throws when missing (`names[i].length`); the index is proven in range (`names.map((n, i) => names[i])`); or the operation speaks for a whole list (`names.every(p)`, `names.join(', ')`).
 
-Bindings change nothing: `((y) => y ?? 0)(names[i])` and `(() => { const y = names[i]; return y ?? 0; })()` are cheats too. These are not:
+## Model
 
-- No partial read: `names.every((n) => n !== 'off')` and `names.join(', ')` speak for the whole list.
-- No elimination: `names.slice(i, i + 1).map((n) => n === 'on')` and `.filter((n) => n === 'on')` stay lists, with `[]` as the absence answer; so does `names[i] !== undefined ? [names[i]] : []`.
-- Absence observed rather than replaced: `names[i] === undefined`, or a present branch that ignores the element (`names[i] !== undefined ? y : 5`).
-- The index is determined: inside `names.map((n, i) => names[i] === 'on')`, `names[i]` always exists.
+The verdicts concern this model, not general JavaScript safety.
 
-## How it works
-
-- **Frontend** ([frontend.rs](src/frontend.rs)) lowers the Oxc AST and normalizes at the boundary. Addition, subtraction, negation, and constant multiplication become canonical integer affine sums. String literals become `Str` keyed by their decoded UTF-16 code units. Binders are globally fresh. A non-negative integer literal index into an array literal folds to that element, or to `undefined` past its end, when no spread or hole precedes it. Inside a `map`, `filter`, `find`, `every`, `some`, or `flatMap` callback, the receiver indexed by the callback's own index parameter becomes the total read `At`. A two-parameter function that only forwards, `(x, k) => f(x, k)` with `f` mentioning neither, becomes `f`, so `map(f)` and `map((x, k) => f(x, k))` are one term.
-- **Analysis** ([engine.rs](src/engine.rs)) gives every class interval bounds, free variables, known booleans and strings, and six facts. `defined`: the value is never `undefined`. A list's `elements` are defined for input lists, for literals of defined values, and for `Map(f, k, xs)` only when `f` provably `returns` a defined value; an in-bounds read is as defined as its list's elements. `params`: a function's parameter count. `callable`: a function of at most two parameters with a resolved body. `opaque`: every representation holds unsupported syntax or an unresolved call, where a `Map`, `Filteri`, `Foldl`, `Every`, or `Some` over a function that is not callable counts as a call. The `??` and `=== undefined` rules and M1 read `defined`; extraction and the verdict read `callable` and `opaque`.
-- **M1** recognizes `If(c, t, z)` where `c` is the presence test of a partial read `xs[k]`, found among the parents of `c` as the read's expansion `If(c, At(xs, k), Undef)`, and `t` is defined. When `t` is the read it builds `Maybe(z, IndexQ(xs, k))`. Otherwise it abstracts `f = fun x -> t[xs[k] := x]`, builds `Maybe(z, IndexQ(Map(f, 0, xs), k))`, and unions the mapped read with `If(c, t, Undef)`. It skips a constant `t` and a non-empty list `t` against an empty `z`, and fires once per class.
-- **Short lists.** Over a list of length at most one, a fold, `every`, `some`, a filter's `length`, `join`, and `flat` become the operation on `xs[0]` when it exists and the empty-list value otherwise; M1 then finds the witness. Slice lengths come from constant slice widths, so the two-element slice sum (length `[0, 2]`) stays a fold and is `no cheat`.
-- **Literal lists** are decided structurally. `at-cons` and `at-append` take the one branch a known index selects; `foldl-cons`, `filteri-cons`, `map-cons`, `join-cons`, and `flat-cons` unfold them. `every` and `some` have no structural rules, so their short-list form also covers literals of at most one element. The other short-list forms and the relational read lemmas (`prefix-last`, `short-last`) leave literals alone, and no partial read is seeded at a known position of a literal.
-- **Projection.** Index predicates such as `(_, idx) => idx === i` rewrite a filter to `Select`, the list holding at most the selected element, so `find` becomes an indexed read.
-- **Callbacks** that rules apply go through one helper, which binds one parameter per argument and drops surplus arguments; rules spell it `Call2(f, a, b)`, and short folds try direct affine substitution first. An unknown free function is applied as the direct call `f(a, b)`. A parameter is applied once substitution supplies its value. A callback with a parameter left unbound stays an unresolved `Call2`. Substitution into an affine sum yields a canonical sum.
-- **Rules** ([rules.rs](src/rules.rs)) are directed `egg::rewrite!` rules. `===` has explicit mirror rules; there is no general commutation or association. Distribution over a conditional never enters an `If` whose condition is decided, since the class already holds the live branch and the dead one can unfold without end. Comparison and negation rewrites stop once a class's boolean is known; integer equality on a live conditional is decided by distributing `===` into its branches only; `!` is pushed into a conditional only when that conditional tests a read's presence; `a && b` and `a || b` become `If(a, b, false)` and `If(a, true, b)`. Structural rules skip cyclic representatives such as `Append(xs, Nil)` once it has merged with `xs`.
-
-## Model boundaries
-
-The verdicts concern this algebraic model, not general JavaScript safety. Several boundaries give a wrong value or verdict rather than `UNDECIDED`; they are marked.
-
-- Arithmetic is over integers, not IEEE-754 (`NaN`, infinities, rounding, signed zero). `+` is integer addition unless an operand is syntactically a string (a literal or a concatenation), which makes it ordered `Concat`. Wrong value: `names[i] + names[j] === 'ab'` folds to `false`. String-to-number coercion and string ordering are outside the model.
-- Strict (in)equality against anything but `undefined` is in the cheat form; ordering comparisons are not. Wrong verdict: `widths[i] < 3` reads `no cheat` although `undefined < 3` is `false`, because the model does not coerce `undefined` to `NaN`.
-- `z` is not required to be proven defined, so `names[i] ?? y` and `widths[i] === j` with unknown `y` and `j` are `CHEAT` even though `y` or `j` may be `undefined`.
-- Input lists are dense and their elements defined; sparse arrays and stored `undefined` are outside the model.
-- A walker passes a callback (element, index) and `reduce` passes (accumulator, element). A callback that declares more parameters reads what the model does not supply (the array, `reduce`'s index), so its application stays unresolved and the verdict is `UNDECIDED`, whether the callback is written in place or bound first.
-- Direct calls are curried: `f(a, b)` applies `f` to `a`, then to `b`. So `(a, b) => e` and `(a) => (b) => e` are not distinguished. Wrong value: calling a function with fewer arguments than parameters yields a partial application instead of binding `undefined`; `((a, b, k) => k)(1, 2)` reads `no cheat` with a function as its value. Under currying, `(x, k) => f(x, k)` and `f` agree; in JavaScript they differ only when `f` reads further arguments. The one-parameter `(x) => f(x)` is kept distinct from `f`: `['1', '2'].map(parseInt)` is `[1, NaN]`, but `['1', '2'].map((x) => parseInt(x))` is `[1, 2]`.
-- `flat()` spreads one level: a known list element is spread and a known number, string, or boolean is kept; an element of unknown type leaves `Spread` unresolved (`[x].flat()`). `flat(depth)` is unsupported. `join()` uses `','`, and an `undefined` element writes `''`.
-- `every` and `some` over a literal list longer than one element stay `Every` and `Some` terms.
-- Records, `Map.get`, object destructuring, mutation, side effects, and general control flow are not modeled: on their own they are `UNDECIDED`, but a witness elsewhere still makes the expression `CHEAT` (`names[i] ?? ({ x: 1 })`). Blocks support straight-line `const` bindings and returning branches. Logical operators are boolean. Symbolic slice bounds stay `Rel` terms until concrete bounds justify expansion.
+- **Free variables** get a precondition from how the expression uses them: one used as an index, a slice or `at` bound, an operand of `-`, `*`, unary `-`, or an ordering comparison, or compared with a walker callback's own index parameter, is an integer; one used as a receiver or spread is a dense list whose elements are defined; one that is called is a function; any other may be anything, including `undefined`.
+- **Numbers** are integers, exact up to 2^53 - 1 in magnitude; arithmetic beyond that, and non-integer literals, are not modeled. `+` is integer addition on integers, concatenation when an operand is a string, and otherwise an uninterpreted operation that is never `undefined`. Strings compare by UTF-16 code units; string ordering compares code units.
+- **Calls** to known functions inline with JavaScript's arity: missing arguments are `undefined`, walkers pass (element, index, array) and `reduce` passes (accumulator, element, index, array). A call to an unknown function, or a walker over one, is unresolved.
+- **Lists** of known length are evaluated element by element. On a symbolic list, `map`, `filter`, `every`, `some`, `join`, `flat`, and `reduce` stay walker terms, except where lowering knows more: a slice whose bounds differ by one, or a filter that keeps exactly `list[j]`, holds at most one element; a `reduce` whose callback ignores its accumulator yields its value on the last element. `flat` spreads an element of unknown type as if it may be a list.
+- **Not modeled**, and `UNDECIDED` unless a witness elsewhere makes the expression a cheat: records and property reads other than `length`, `Map`, optional chaining, `null`, loose equality, `typeof`, mutation, loops, and statements other than `const`, `if`, blocks, and `return`.
 
 ## Latency
 
@@ -96,16 +71,15 @@ The verdicts concern this algebraic model, not general JavaScript safety. Severa
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 3.8 us |
-| Worst per-case parser + lowering p95 | 19.0 us |
-| Worst per-case total p95 / p99 | 804.7 / 926.3 us |
-| Largest total among 36,500 samples | 1,471.1 us |
-| Worst total p95: original / string / every / some cases | 516.9 / 513.4 / 633.2 / 804.7 us |
-| Worst total p95: unknown-callback / join and flat cases | 313.9 / 368.1 us |
-| Two-element slice sum total p50 / p95 | 153.0 / 170.2 us |
-| Two-element slice sum graph / iterations | 28 / 5 |
-| All-case graph sizes / iterations | 5-99 / 1-12 |
-| One-time runtime initialization | 1,323.1 us |
-| First evaluation after initialization | 302.6 us |
+| Worst per-case parser p95 | 4.8 us |
+| Worst per-case parser + semantic analysis + lowering p95 | 38.6 us |
+| Worst per-case total p95 / p99 | 532.3 / 659.0 us |
+| Largest total among 36,500 samples | 803.5 us |
+| Worst total p95: original / string / every / some cases | 532.3 / 302.0 / 137.8 / 140.2 us |
+| Worst total p95: unknown-callback / join and flat cases | 42.3 / 122.0 us |
+| Two-element slice sum total p50 / p95 | 34.6 / 58.8 us |
+| All-case graph sizes / iterations | 1-88 / 1-8 |
+| One-time runtime initialization | 867.2 us |
+| First evaluation after initialization | 118.2 us |
 
-The worst case is `names.slice(i, i + 1).filter((n) => n === 'on').length !== 0` (99 e-nodes, 12 iterations); across runs its p99 lands on either side of 1 ms, and its largest sample exceeds it, while its p95 stays under the threshold. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
+The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
