@@ -195,9 +195,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Term(_, Ty::Any) => {
                 // The fallback runs only where `v` is nullish, which lowering cannot decide.
                 let taken = l.dynamic("nullish", &[&v], Ty::Bool);
-                let (_, fallback) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &mut |l, without, with| {
-                    l.select(&taken, with, without)
-                });
+                let join = super::refs::Join::Test { test: taken, first_if: false };
+                let (_, fallback) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &join);
                 let ty = if fallback.defined() { Ty::Defined } else { Ty::Any };
                 l.dynamic("??", &[&v, &fallback], ty)
             }
@@ -212,9 +211,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Throw => Val::Throw,
             test => {
                 // The right operand runs only where the left does not decide.
-                let (_, other) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &mut |l, without, with| {
-                    if or { l.select(&test, without, with) } else { l.select(&test, with, without) }
-                });
+                let join = super::refs::Join::Test { test: test.clone(), first_if: or };
+                let (_, other) = l.fork(&mut |l, second| if second { l.arm(right) } else { Val::Undef }, &join);
                 if or { l.select(&test, v, other) } else { l.select(&test, other, v) }
             }
         })
@@ -230,7 +228,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Bool(false) => l.arm(no),
             Val::Throw => Val::Throw,
             test => {
-                let (y, n) = l.fork(&mut |l, second| l.arm(if second { no } else { yes }), &mut |l, a, b| l.select(&test, a, b));
+                let join = super::refs::Join::Test { test: test.clone(), first_if: true };
+                let (y, n) = l.fork(&mut |l, second| l.arm(if second { no } else { yes }), &join);
                 l.select(&test, y, n)
             }
         })
@@ -253,7 +252,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 let (world, side) = if present { (Val::Term(s.elem, s.items.ty()), s.present.clone()) } else { (Val::Undef, s.absent.clone()) };
                 l.within(s.read, world, |l| l.worlds(side, family, then))
             },
-            &mut |l, a, p| l.resplit(&s, a, p, Family::Propagate),
+            &super::refs::Join::Read(s.clone()),
         );
         self.resplit(&s, absent, present, family)
     }
@@ -272,14 +271,21 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             return if *b { yes } else { no };
         }
         // Choosing between arms swallows nothing: a split in an arm keeps its own flow.
-        self.lift2(yes, no, Family::Propagate, &mut |l, y, n| l.choose(test, &y, &n))
+        self.lift2(yes, no, Family::Propagate, &mut |l, y, n| l.choose(test, &y, &n, true))
     }
-    fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>) -> Val<'a> {
+    /// [`Self::select`] as a term, without keeping identity: the contents of a choice.
+    pub fn select_contents(&mut self, test: &Val<'a>, yes: Val<'a>, no: Val<'a>) -> Val<'a> {
+        if let Val::Bool(b) = test {
+            return if *b { yes } else { no };
+        }
+        self.lift2(yes, no, Family::Propagate, &mut |l, y, n| l.choose(test, &y, &n, false))
+    }
+    fn choose(&mut self, test: &Val<'a>, yes: &Val<'a>, no: &Val<'a>, identity: bool) -> Val<'a> {
         if yes.identical(no) || (yes.is_known() && super::ops::same(yes, no) == Some(true)) {
             return yes.clone();
         }
         // Choosing an array with identity keeps its identity.
-        if matches!(yes, Val::Ref(_)) || matches!(no, Val::Ref(_)) {
+        if identity && (super::refs::holds_ref(yes) || super::refs::holds_ref(no)) {
             return self.choice(test.clone(), yes.clone(), no.clone());
         }
         let ty = join(yes, no);

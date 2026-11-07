@@ -67,7 +67,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                     if flipped { l.lift2(other, mine, family, op) } else { l.lift2(mine, other, family, op) }
                 })
             },
-            &mut |l, a, p| l.resplit(&s, a, p, Family::Propagate),
+            &super::refs::Join::Read(s.clone()),
         );
         self.resplit(&s, absent, present, family)
     }
@@ -80,10 +80,30 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         if vals.iter().any(|v| matches!(v, Val::Throw)) {
             return Val::Throw;
         }
-        let throwing: Vec<Val<'a>> = vals.iter().filter(|v| v.may_throw()).cloned().collect();
+        let raising: Vec<Val<'a>> = vals.iter().filter(|v| self.may_raise(v)).cloned().collect();
+        let before = self.state.clone();
         let out = then(self, vals);
-        throwing.into_iter().fold(out, |out, mask| {
-            self.lift2(out, mask, Family::Propagate, &mut |_, out, mask| if matches!(mask, Val::Throw) { Val::Throw } else { out })
+        // What follows runs, and has effects, only where nothing before it threw.
+        if !self.state.same(&before) {
+            let mut after = std::mem::replace(&mut self.state, before.clone());
+            for mask in &raising {
+                after = self.guard(&before, after, mask);
+            }
+            self.state = after;
+        }
+        raising.into_iter().fold(out, |out, mask| self.mask(out, &mask))
+    }
+    /// `out` where `mask` does not throw, and a throw where it does.
+    fn mask(&mut self, out: Val<'a>, mask: &Val<'a>) -> Val<'a> {
+        if matches!(mask, Val::Term(..) | Val::Ref(_))
+            && let Some(test) = self.throws_when(mask)
+        {
+            return self.select(&test, Val::Throw, out);
+        }
+        self.lift2(out, mask.clone(), Family::Propagate, &mut |l, out, mask| match mask {
+            Val::Throw => Val::Throw,
+            Val::Term(..) | Val::Ref(_) if l.may_raise(&mask) => l.mask(out, &mask),
+            _ => out,
         })
     }
     /// A value under the current narrowing: each split on a read a branch decided resolves
@@ -124,12 +144,18 @@ impl<'a> Lowerer<'a, '_> {
     pub fn binary(&mut self, op: Bin, a: Val<'a>, b: Val<'a>) -> Val<'a> {
         let undecided = op == Bin::Eq && (unknown(&a) || unknown(&b));
         let family = if undecided { Family::Undecided } else { Family::Sink };
-        self.lift2(a, b, family, &mut |l, a, b| match op {
-            _ if matches!(a, Val::Throw) || matches!(b, Val::Throw) => Val::Throw,
-            Bin::Add => l.add(a, b),
-            Bin::Sub | Bin::Mul => l.arith(op, &a, &b),
-            Bin::Lt | Bin::Le => l.order(op == Bin::Lt, &a, &b),
-            Bin::Eq => l.strict_eq(&a, &b),
+        self.lift2(a, b, family, &mut |l, a, b| {
+            if matches!(a, Val::Throw) || matches!(b, Val::Throw) {
+                return Val::Throw;
+            }
+            l.consume(&a);
+            l.consume(&b);
+            match op {
+                Bin::Add => l.add(a, b),
+                Bin::Sub | Bin::Mul => l.arith(op, &a, &b),
+                Bin::Lt | Bin::Le => l.order(op == Bin::Lt, &a, &b),
+                Bin::Eq => l.strict_eq(&a, &b),
+            }
         })
     }
     /// `a + b`: concatenation when an operand is a string or a list, and otherwise numeric
@@ -225,6 +251,7 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// JavaScript truthiness of a value that is not a split.
     pub fn truthy(&mut self, v: Val<'a>) -> Val<'a> {
+        self.consume(&v);
         match v {
             Val::Undef | Val::NaN => Val::Bool(false),
             Val::Bool(_) | Val::Throw | Val::Term(_, Ty::Bool) | Val::Split(_) => v,
@@ -321,8 +348,10 @@ fn identical_object(a: &Val<'_>, b: &Val<'_>) -> Option<bool> {
         (Val::List(x), Val::List(y)) => Some(Rc::ptr_eq(x, y)),
         (Val::Fun(x), Val::Fun(y)) => Some(Rc::ptr_eq(x, y)),
         (Val::Ref(x), Val::Ref(y)) if x == y => Some(true),
+        // A choice may be either of its alternatives.
+        (Val::Ref(RefKey::Choice(_)), _) | (_, Val::Ref(RefKey::Choice(_))) => None,
         // A local array is a new object, and so is an array just built.
-        (Val::Ref(RefKey::Local(_)), Val::Ref(_)) | (Val::Ref(_), Val::Ref(RefKey::Local(_))) => Some(false),
+        (Val::Ref(RefKey::Local(_) | RefKey::Place(..)), Val::Ref(_)) | (Val::Ref(_), Val::Ref(RefKey::Local(_) | RefKey::Place(..))) => Some(false),
         (Val::Ref(_), v) | (v, Val::Ref(_)) if fresh(v) => Some(false),
         _ => None,
     }

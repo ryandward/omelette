@@ -12,6 +12,8 @@ impl<'a> Lowerer<'a, '_> {
         self.lift2(list, index, Family::Propagate, &mut |l, list, index| l.read_plain(list, &index))
     }
     fn read_plain(&mut self, list: Val<'a>, index: &Val<'a>) -> Val<'a> {
+        self.consume(&list);
+        self.consume(index);
         let list = self.deref(list);
         let Val::Num(f) = index else {
             return match (&list, index) {
@@ -48,8 +50,8 @@ impl<'a> Lowerer<'a, '_> {
     /// callback runs only on a non-empty list. Otherwise split, and marked as drift if the
     /// index came from a walker.
     pub fn element(&mut self, list: Seq, index: &Form) -> Val<'a> {
-        if let Some((f, base)) = self.maps.get(&list.id).cloned() {
-            return self.mapped(&f, base, list.id, index);
+        if let Some(mapping) = self.maps.get(&list.id).cloned() {
+            return self.mapped(&mapping, list.id, index);
         }
         let idx = self.b.form(index);
         if self.in_range(list.id, index) {
@@ -89,21 +91,28 @@ impl<'a> Lowerer<'a, '_> {
             _ => false,
         }
     }
-    /// An element of `base.map(f)`: `f` applied to the element of `base` where present, as
-    /// map calls it: with the element, its index, and `base`, which is non-empty there.
-    fn mapped(&mut self, f: &Val<'a>, base: Seq, list: Id, index: &Form) -> Val<'a> {
-        let slot = self.element(base, index);
-        let (f, place) = (f.clone(), (list, self.b.form(index)));
+    /// An element of a mapped list: the callback, run as the map ran it (with the element,
+    /// its index, and the receiver, against the store when the map ran) where the element is
+    /// present. A callback that wrote to arrays made each element depend on the ones before
+    /// it, so its value is unknown.
+    fn mapped(&mut self, m: &super::value::Mapping<'a>, list: Id, index: &Form) -> Val<'a> {
+        let slot = self.element(m.base, index);
+        let place = (list, self.b.form(index));
         let index = index.clone();
         self.worlds(slot, Family::Propagate, &mut |l, x| match x {
             Val::Undef => Val::Undef,
+            _ if m.writes => {
+                let at = Val::Num(index.clone());
+                l.dynamic("mapped", &[&Val::Term(list, Ty::List(Items::Any)), &at], Ty::Any)
+            }
             x => {
-                // The map already ran the callback on this element, effects and all.
+                let (outer, choices) = (l.state.cells.clone(), l.choices.len());
                 let out = l.speculate(|l| {
-                    l.walking.push(base.id);
-                    let out = l.apply(f.clone(), vec![x, Val::Num(index.clone()), base.val()]);
+                    l.state = m.state.clone();
+                    l.walking.push(m.base.id);
+                    let out = l.apply(m.f.clone(), vec![x, Val::Num(index.clone()), m.this.clone()]);
                     l.walking.pop();
-                    out
+                    l.detach(out, &outer, choices)
                 });
                 l.held(place, out)
             }
@@ -111,8 +120,8 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// The list a chain of maps starts from.
     pub fn base_of(&self, mut list: Seq) -> Seq {
-        while let Some((_, base)) = self.maps.get(&list.id) {
-            list = *base;
+        while let Some(mapping) = self.maps.get(&list.id) {
+            list = mapping.base;
         }
         list
     }
@@ -169,8 +178,10 @@ impl<'a> Lowerer<'a, '_> {
     pub fn property(&mut self, object: Val<'a>, name: &str) -> Val<'a> {
         self.lift(object, Family::Propagate, &mut |l, v| match v {
             Val::Undef | Val::Throw => Val::Throw,
-            v if name == "length" => l.length(v),
-            _ => l.unsupported(),
+            v => {
+                l.consume(&v);
+                if name == "length" { l.length(v) } else { l.unsupported() }
+            }
         })
     }
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and

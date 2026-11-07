@@ -51,6 +51,9 @@ pub struct Evaluation {
     /// The flows by which a missing read is swallowed, when the verdict is CHEAT.
     pub families: Vec<Family>,
     pub mutation: Mutation,
+    /// Lowering evaluated something it does not model, so `canonical` is the value under the
+    /// model's assumptions about it, not a claim about JavaScript's result.
+    pub opaque: bool,
     pub saturated: bool,
     pub consistent: bool,
     pub iterations: usize,
@@ -138,6 +141,7 @@ pub fn evaluate_with_limits(source: &str, limits: Limits) -> Result<Evaluation, 
         verdict,
         families,
         mutation,
+        opaque: lowered.opaque,
         saturated,
         consistent,
         iterations: run.iterations.len(),

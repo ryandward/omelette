@@ -72,6 +72,11 @@ fn live(g: &Graph, n: &Core) -> Vec<Id> {
             Some(false) => vec![*z],
             None => vec![*flow, *z, *lam, *read, *has],
         },
+        Core::Elim([z, lam, read, has]) => match decided(g, *has) {
+            Some(true) => vec![*lam, *read],
+            Some(false) => vec![*z],
+            None => vec![*z, *lam, *read, *has],
+        },
         Core::Map([_, xs]) | Core::Filter([_, xs]) | Core::Every([_, xs]) | Core::Some([_, xs]) if empty(*xs) => vec![],
         Core::Fold([_, z, xs]) if empty(*xs) => vec![*z],
         n => n.children().to_vec(),
@@ -299,16 +304,18 @@ pub struct Mutations {
 }
 
 /// Walk the effect log as detection walks a value: decided conditionals and presence tests
-/// prune what cannot happen.
+/// prune what cannot happen. A conditional's test is known inside each arm, so a presence
+/// test the enclosing branch decides prunes too.
 pub fn mutations(g: &Graph, log: Id) -> Mutations {
     let mut found = Mutations::default();
     let mut seen = HashSet::new();
-    let mut stack = vec![log];
-    while let Some(id) = stack.pop() {
+    let mut stack: Vec<(Id, Vec<(Id, bool)>)> = vec![(log, Vec::new())];
+    while let Some((id, facts)) = stack.pop() {
         let id = g.find(id);
-        if !seen.insert(id) || g[id].data.constant.is_some() {
+        if g[id].data.constant.is_some() || !seen.insert((id, facts.clone())) {
             continue;
         }
+        let known = |c: Id| decided(g, c).or_else(|| facts.iter().find(|(k, _)| g.find(*k) == g.find(c)).map(|&(_, b)| b));
         for n in &g[id].nodes {
             match n {
                 Core::Mutate([op, owner]) => {
@@ -318,7 +325,25 @@ pub fn mutations(g: &Graph, log: Id) -> Mutations {
                     }
                     found.unknown |= unknown;
                 }
-                n => stack.extend(live(g, n)),
+                Core::If([c, yes, no]) => {
+                    if let Some(b) = known(*c) {
+                        stack.push((if b { *yes } else { *no }, facts.clone()));
+                    } else {
+                        let with = |b: bool| facts.iter().copied().chain(std::iter::once((*c, b))).collect::<Vec<_>>();
+                        stack.push((*yes, with(true)));
+                        stack.push((*no, with(false)));
+                    }
+                }
+                Core::Maybe([_, z, lam, _, has]) | Core::Elim([z, lam, _, has]) => match known(*has) {
+                    Some(true) => stack.push((*lam, facts.clone())),
+                    Some(false) => stack.push((*z, facts.clone())),
+                    None => {
+                        let with = |b: bool| facts.iter().copied().chain(std::iter::once((*has, b))).collect::<Vec<_>>();
+                        stack.push((*z, with(false)));
+                        stack.push((*lam, with(true)));
+                    }
+                },
+                n => stack.extend(live(g, n).into_iter().map(|c| (c, facts.clone()))),
             }
         }
     }
@@ -338,7 +363,7 @@ fn holders(g: &Graph, owner: Id) -> (bool, bool) {
         let class = &g[id];
         external |= class.nodes.iter().any(|n| matches!(n, Core::External));
         unknown |= class.nodes.iter().any(|n| matches!(n, Core::Unowned));
-        for n in class.nodes.iter().filter(|n| matches!(n, Core::If(_))) {
+        for n in &class.nodes {
             stack.extend(live(g, n));
         }
     }

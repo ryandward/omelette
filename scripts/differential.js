@@ -34,9 +34,25 @@ function decode(x) {
     ? { true: true, false: false, undefined: undefined, nan: NaN, nil: [] }[x]
     : NOT;
 }
-const same = (a, b) =>
-  Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => same(x, b[i])) : Object.is(a, b);
-const show = (v) => (v === NOT ? '<term>' : typeof v === 'function' ? '<function>' : v === undefined ? 'undefined' : JSON.stringify(v));
+// omelette's values are finite, so a cyclic Node array is never equal to one.
+const same = (a, b, open = new Set()) => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Object.is(a, b);
+  if (open.has(b)) return false;
+  open.add(b);
+  const equal = a.length === b.length && a.every((x, i) => same(x, b[i], open));
+  open.delete(b);
+  return equal;
+};
+const show = (v) => {
+  if (v === NOT) return '<term>';
+  if (typeof v === 'function') return '<function>';
+  if (v === undefined) return 'undefined';
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return '<cyclic>';
+  }
+};
 
 let failures = 0;
 const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('#'));
@@ -50,14 +66,21 @@ for (const e of lines) {
   }
   let out;
   try {
-    out = execFileSync(BIN, [e], { encoding: 'utf8', timeout: 5000 });
+    out = execFileSync(BIN, [e], { encoding: 'utf8', timeout: 5000, maxBuffer: 1 << 28 });
   } catch (err) {
     out = (err.stdout || '') + (err.stderr || '');
+    if (!/^consistency: /m.test(out)) {
+      failures++;
+      console.log(`${e}\n    omelette failed: ${err.code || err.signal || err.status}`);
+      continue;
+    }
   }
   if (/parse error/.test(out)) continue;
   const root = (out.match(/^root: (.*)$/m) || [])[1] || '?';
   const verdict = (out.match(/^verdict: (.*)$/m) || [])[1] || '?';
   const consistent = /^consistency: ok$/m.test(out);
+  // An opaque run's root assumes what lowering does not model; it claims nothing.
+  const opaque = /^opaque: yes/m.test(out);
   let value;
   try {
     value = decode(parse(root.replace(/\(/g, ' ( ').replace(/\)/g, ' ) ').trim().split(/\s+/)));
@@ -66,8 +89,8 @@ for (const e of lines) {
   }
   let problem = null;
   if (!consistent) problem = 'inconsistent graph';
-  else if (js && js.throws) problem = value === NOT ? null : `a value where Node throws ${js.throws}`;
-  else if (value === NOT) problem = null; // An unresolved term claims no value.
+  else if (value === NOT || opaque) problem = null; // An unresolved term claims no value.
+  else if (js && js.throws) problem = `a value where Node throws ${js.throws}`;
   else if (!same(value, js)) problem = `${show(value)} where Node gives ${show(js)}`;
   if (problem) {
     failures++;

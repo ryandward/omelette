@@ -32,6 +32,9 @@ MUTATION	xs.slice(i, i + 1).map((x) => x.push(1))
 MUTATION	xs.slice().map((x) => x.push(1))
 MUTATION	[0, 1].some((x) => x > 0 && xs.push(1))
 MUTATION	(() => { const a = [xs]; a[0].push(1); return a; })()
+MUTATION	xs.find((x, i) => i === ys.push(1))
+MUTATION	xs.map((x) => x).map((p) => p.pop())
+MUTATION	(() => { const a = []; const b = n > 0 ? a : []; xs.push(b); a.reverse(); return 0; })()
 # Pure transforms and honest local construction: the mutated array is one the expression built
 # and holds alone, or the mutation never runs.
 none	[...xs].sort()
@@ -53,6 +56,11 @@ none	[0, 1].every((x) => x > 0 && xs.push(1))
 none	(() => { const m = xs.map((x) => [x]); m[0].push(1); return m; })()
 none	(xs[i] ?? []).length
 none	xs.map((x) => { const a = [x]; a.push(x); return a; })
+none	(() => { const b = [1]; if (n > 0) { b.push([2]); } return b.length; })()
+none	(() => { const a = []; (xs.length < 0 ? ys.push(a) : 0); a.push(1); return 0; })()
+none	(xs.length > 0 ? 0 : xs[0].push(1))
+none	[1].sort((a, b) => (ys.push(1), 0))
+none	xs.slice(0, 1).filter(() => false).map(() => ys.push(1))
 # Unknown holders: the mutated value may or may not be the caller's, or code lowering cannot see
 # may mutate.
 UNDECIDED	xs.reduce((acc, x) => (acc.push(x), acc), ys)

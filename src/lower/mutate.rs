@@ -27,7 +27,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Ref(_) => {
                 let stored: Vec<Val<'a>> = args.iter().map(|v| self.own(v.clone())).collect();
                 let contents = self.deref(receiver.clone());
-                let (result, after) = self.update(m, contents, &stored);
+                let (result, after) = if buries(&contents, &stored) { self.unknown_update(m) } else { self.update(m, contents, &stored) };
                 if matches!(result, Val::Throw) {
                     return Val::Throw;
                 }
@@ -43,8 +43,8 @@ impl<'a> Lowerer<'a, '_> {
             }
             Val::Term(_, Ty::Defined | Ty::Any) => {
                 // An object of unknown type: the mutation is logged by who holds it, and its
-                // result is unknown. Nothing lowering models reads into it afterward.
-                self.log(m, &receiver, args);
+                // result is unknown.
+                self.untracked(m, &receiver, args);
                 let mut parts = vec![&receiver];
                 parts.extend(args);
                 self.dynamic(m.name(), &parts, Ty::Any)
@@ -52,6 +52,27 @@ impl<'a> Lowerer<'a, '_> {
             Val::Fun(_) => self.unsupported(),
             _ => Val::Throw,
         }
+    }
+    /// A mutation of an object the store does not track. The caller's objects, and arrays a
+    /// map built for each element, are distinct from every array the store holds; an object
+    /// of unknown holder may be one of them, so then no array's contents are known afterward.
+    fn untracked(&mut self, m: Mutator, target: &Val<'a>, stored: &[Val<'a>]) {
+        let owner = self.owner(target);
+        self.log(m, target, stored);
+        if !matches!(self.b.node(owner), Core::External | Core::Internal) {
+            self.clobber();
+        }
+    }
+    /// A mutation whose effect on a symbolic list's contents would hold another array only as
+    /// a snapshot: its result and the contents after it are unknown.
+    fn unknown_update(&mut self, m: Mutator) -> (Val<'a>, Val<'a>) {
+        let after = self.unknown_list();
+        let result = match m {
+            Mutator::Push | Mutator::Unshift => self.dynamic("length", &[&after], Ty::Defined),
+            Mutator::Splice => self.unknown_list(),
+            _ => Val::Undef,
+        };
+        (result, after)
     }
     /// A mutating method's result, and the array's contents after it.
     fn update(&mut self, m: Mutator, c: Val<'a>, args: &[Val<'a>]) -> (Val<'a>, Val<'a>) {
@@ -75,6 +96,11 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// `pop` (the last element) or `shift` (the first), and what remains.
     fn take(&mut self, c: Val<'a>, last: bool) -> (Val<'a>, Val<'a>) {
+        if let Val::Split(_) = c {
+            let taken = self.lift(c.clone(), Family::Propagate, &mut |l, c| l.take(c, last).0);
+            let rest = self.lift(c, Family::Propagate, &mut |l, c| l.take(c, last).1);
+            return (taken, rest);
+        }
         match c {
             Val::List(items) => {
                 let mut rest = items.to_vec();
@@ -95,6 +121,7 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn reversed(&mut self, c: Val<'a>) -> Val<'a> {
         match c {
+            Val::Split(_) => self.lift(c, Family::Propagate, &mut |l, c| l.reversed(c)),
             Val::List(items) => Val::List(Rc::new(items.iter().rev().cloned().collect())),
             Val::Term(id, Ty::List(items)) => Seq { id: self.b.add(Core::Reverse(id)), items }.val(),
             c => c,
@@ -105,6 +132,9 @@ impl<'a> Lowerer<'a, '_> {
     fn sorted(&mut self, c: Val<'a>, cmp: &Val<'a>) -> (Val<'a>, Val<'a>) {
         if !matches!(cmp, Val::Undef | Val::Fun(_) | Val::Term(_, Ty::Defined | Ty::Any)) {
             return (Val::Throw, c);
+        }
+        if let Val::Split(_) = c {
+            return (Val::Undef, self.lift(c, Family::Propagate, &mut |l, c| l.sorted(c, cmp).1));
         }
         let list = match c {
             Val::List(ref items) if matches!(cmp, Val::Undef) => match default_order(items) {
@@ -126,7 +156,8 @@ impl<'a> Lowerer<'a, '_> {
                 let (a, b) = (self.b.fresh(list.items.kind()), self.b.fresh(list.items.kind()));
                 self.members.extend([(a, list.id), (b, list.id)]);
                 let args = vec![Val::Term(a, list.items.ty()), Val::Term(b, list.items.ty())];
-                let out = self.repeat(list.id, |l| l.apply(cmp.clone(), args));
+                // A comparator runs only on a list of two or more.
+                let out = self.repeat(list.id, 2, |l| l.apply(cmp.clone(), args));
                 let body = self.emit(&out);
                 self.b.add(Core::Lam(vec![a, b, body].into()))
             }
@@ -146,7 +177,9 @@ impl<'a> Lowerer<'a, '_> {
             let removed: Vec<Val<'a>> = rest.splice(start..start + count, args.iter().skip(2).cloned()).collect();
             return (Val::List(Rc::new(removed)), Val::List(Rc::new(rest)));
         }
-        let removed = self.dynamic("spliced", &[c], Ty::List(Items::Any));
+        let mut parts = vec![c];
+        parts.extend(args);
+        let removed = self.dynamic("spliced", &parts, Ty::List(Items::Any));
         (removed, self.unknown_after(Mutator::Splice, c, args))
     }
     /// Contents after a mutation lowering does not compute: a list of unknown elements.
@@ -200,28 +233,28 @@ impl<'a> Lowerer<'a, '_> {
             Expression::StaticMemberExpression(m) if !m.optional => (self.expr(&m.object), Key::Name(m.property.name.as_str())),
             _ => return self.unsupported(),
         };
-        let index = match &key {
-            Key::Index(k) => k.clone(),
-            Key::Name(_) => Val::Undef,
+        let key = match key {
+            Key::Index(k) => k,
+            Key::Name(name) => Val::Str(Utf16::new(name.encode_utf16())),
         };
-        self.strict(vec![object, index], &mut |l, mut vals| {
-            let object = vals.remove(0);
-            l.erase(object)
+        self.strict(vec![object, key], &mut |l, mut vals| {
+            let (object, key) = (vals.remove(0), vals.remove(0));
+            l.erase(object, &key)
         })
     }
-    fn erase(&mut self, object: Val<'a>) -> Val<'a> {
+    fn erase(&mut self, object: Val<'a>, key: &Val<'a>) -> Val<'a> {
         match object {
-            Val::Split(_) => self.lift(object, Family::Propagate, &mut |l, o| l.erase(o)),
+            Val::Split(_) => self.lift(object, Family::Propagate, &mut |l, o| l.erase(o, key)),
             Val::Undef | Val::Throw => Val::Throw,
             Val::Ref(_) => {
                 let contents = self.deref(object.clone());
-                let after = self.unknown_after(Mutator::Delete, &contents, &[]);
+                let after = self.unknown_after(Mutator::Delete, &contents, std::slice::from_ref(key));
                 self.assign(&object, after);
                 self.log(Mutator::Delete, &object, &[]);
                 Val::Bool(true)
             }
             Val::Term(_, Ty::Defined | Ty::Any) => {
-                self.log(Mutator::Delete, &object, &[]);
+                self.untracked(Mutator::Delete, &object, &[]);
                 Val::Bool(true)
             }
             _ => Val::Bool(true),
@@ -267,16 +300,18 @@ impl<'a> Lowerer<'a, '_> {
         match object {
             Val::Split(_) => self.lift(object, Family::Propagate, &mut |l, o| l.set(o, key, value.clone())),
             Val::Undef | Val::Throw => Val::Throw,
+            // An array's length must be a non-negative integer.
+            Val::Ref(_) if matches!(key, Key::Name("length")) && invalid_length(&value) => Val::Throw,
             Val::Ref(_) => {
                 let value = self.own(value);
                 let contents = self.deref(object.clone());
-                let after = self.written(contents, key, &value);
+                let after = if buries(&contents, std::slice::from_ref(&value)) { self.unknown_list() } else { self.written(contents, key, &value) };
                 self.assign(&object, after);
                 self.log(Mutator::Assign, &object, std::slice::from_ref(&value));
                 value
             }
             Val::Term(_, Ty::Defined | Ty::Any) => {
-                self.log(Mutator::Assign, &object, std::slice::from_ref(&value));
+                self.untracked(Mutator::Assign, &object, std::slice::from_ref(&value));
                 value
             }
             // An array just built, which nothing else holds.
@@ -312,6 +347,21 @@ impl<'a> Lowerer<'a, '_> {
                 self.unknown_after(Mutator::Assign, &c, &[at, value.clone()])
             }
         }
+    }
+}
+
+/// Whether storing these values into these contents would put an array with identity inside a
+/// term, where only its contents at this moment survive.
+fn buries(contents: &Val<'_>, stored: &[Val<'_>]) -> bool {
+    !matches!(contents, Val::List(_)) && stored.iter().any(super::refs::holds_ref)
+}
+
+/// A value that is certainly not a valid array length.
+fn invalid_length(v: &Val<'_>) -> bool {
+    match v {
+        Val::Num(f) => f.known().is_some_and(|n| n < 0),
+        Val::Undef | Val::NaN => true,
+        _ => false,
     }
 }
 

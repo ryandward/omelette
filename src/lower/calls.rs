@@ -187,8 +187,12 @@ impl<'a> Lowerer<'a, '_> {
     /// A method on a receiver: its contents decide the dispatch, and its callbacks receive the
     /// receiver itself.
     fn method(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
-        let this = receiver.clone();
-        let receiver = self.deref(receiver);
+        // The callbacks can reach and change the receiver, so it has an identity.
+        let this = match receiver {
+            Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => self.own(receiver),
+            receiver => receiver,
+        };
+        let receiver = self.deref(this.clone());
         let saved = self.this.replace(this);
         let out = self.dispatch(receiver, name, args);
         self.this = saved;
@@ -204,9 +208,10 @@ impl<'a> Lowerer<'a, '_> {
             Val::List(items) => self.literal_method(&items, name, args),
             Val::Short(s) => self.short_method(&s, name, args),
             Val::Term(id, Ty::List(items)) => self.term_method(Seq { id, items }, name, args),
+            // Each world's contents, with the receiver the callbacks see unchanged.
             Val::Split(_) => self.lift(receiver, Family::Propagate, &mut |l, r| match r {
                 Val::Undef => Val::Throw,
-                r => l.method(r, name, args),
+                r => l.dispatch(r, name, args),
             }),
             Val::Undef | Val::Throw => Val::Throw,
             _ => self.unsupported(),
@@ -241,15 +246,37 @@ impl<'a> Lowerer<'a, '_> {
         }
     }
     /// The callback applied to every (element, index, list).
+    /// The callback on every element: `map` keeps the receiver's length at the start and
+    /// reads each element as it is when its turn comes.
     fn each(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Vec<Val<'a>> {
         let list = self.this_or(Val::List(items.clone()));
-        let indexed = items.iter().cloned().zip(0_i64..);
-        indexed.map(|(x, k)| self.apply(f.clone(), vec![x, Val::int(k), list.clone()])).collect()
+        (0..items.len())
+            .map(|k| {
+                // A removed element leaves a hole, which lowering does not model.
+                let x = self.item_at(items, k).unwrap_or_else(|| self.unsupported());
+                self.apply(f.clone(), vec![x, index(k), list.clone()])
+            })
+            .collect()
+    }
+    /// Element `k` of the list a literal walker runs over, as it is now, since a callback may
+    /// have changed the receiver; `None` where it is gone.
+    fn item_at(&mut self, items: &Rc<Vec<Val<'a>>>, k: usize) -> Option<Val<'a>> {
+        let Some(this @ Val::Ref(_)) = self.this.clone() else { return items.get(k).cloned() };
+        let now = self.deref(this);
+        if let Val::List(now) = self.settle(now) {
+            now.get(k).cloned()
+        } else {
+            self.clobber();
+            items.get(k).cloned()
+        }
     }
     /// `every` or `some` over a literal list, from element `k`: each callback runs only while
     /// the answer is still open.
     fn quantify(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, every: bool, k: usize) -> Val<'a> {
-        let Some(item) = items.get(k).cloned() else { return Val::Bool(every) };
+        if k >= items.len() {
+            return Val::Bool(every);
+        }
+        let Some(item) = self.item_at(items, k) else { return self.quantify(items, f, every, k + 1) };
         let list = self.this_or(Val::List(items.clone()));
         let v = self.apply(f.clone(), vec![item, Val::int(i64::try_from(k).unwrap_or(i64::MAX)), list]);
         let truth = self.truthy_split(v);
@@ -258,10 +285,9 @@ impl<'a> Lowerer<'a, '_> {
             Val::Bool(_) => Val::Bool(!every),
             Val::Throw => Val::Throw,
             t => {
-                let pick = |l: &mut Self, more: Val<'a>, stop: Val<'a>| if every { l.select(&t, more, stop) } else { l.select(&t, stop, more) };
-                let (more, stop) =
-                    l.fork(&mut |l, second| if second { Val::Bool(!every) } else { l.quantify(items, f, every, k + 1) }, &mut |l, a, b| pick(l, a, b));
-                pick(l, more, stop)
+                let join = super::refs::Join::Test { test: t.clone(), first_if: every };
+                let (more, stop) = l.fork(&mut |l, second| if second { Val::Bool(!every) } else { l.quantify(items, f, every, k + 1) }, &join);
+                if every { l.select(&t, more, stop) } else { l.select(&t, stop, more) }
             }
         })
     }
@@ -270,10 +296,17 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn fold_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
         let list = self.this_or(Val::List(items.clone()));
-        let mut rest = items.iter().cloned().zip(0_i64..);
-        let Some(mut acc) = init.or_else(|| rest.next().map(|(x, _)| x)) else { return Val::Throw };
-        for (x, k) in rest {
-            acc = self.apply(f.clone(), vec![acc, x, Val::int(k), list.clone()]);
+        let mut ks = 0..items.len();
+        let mut acc = init;
+        while acc.is_none() {
+            let Some(k) = ks.next() else { return Val::Throw };
+            acc = self.item_at(items, k);
+        }
+        let mut acc = acc.unwrap_or(Val::Throw);
+        for k in ks {
+            if let Some(x) = self.item_at(items, k) {
+                acc = self.apply(f.clone(), vec![acc, x, index(k), list.clone()]);
+            }
         }
         acc
     }
@@ -375,10 +408,22 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             if matches!(v, Val::Undef) {
                 return unit.clone();
             }
-            l.walking.push(read_list);
-            let value = present(l, elem.clone());
-            l.walking.pop();
-            l.select(&keep, value, unit.clone())
+            // The callback runs only on an element the filters kept.
+            let mut run = |l: &mut Self| {
+                l.walking.push(read_list);
+                let value = present(l, elem.clone());
+                l.walking.pop();
+                value
+            };
+            match &keep {
+                Val::Bool(false) => unit.clone(),
+                Val::Bool(true) => run(l),
+                keep => {
+                    let join = super::refs::Join::Test { test: keep.clone(), first_if: true };
+                    let (value, _) = l.fork(&mut |l, second| if second { unit.clone() } else { run(l) }, &join);
+                    l.select(keep, value, unit.clone())
+                }
+            }
         })
     }
     /// The list the slot reads, which is non-empty where the slot is present.
@@ -390,14 +435,23 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     }
     /// A walker over the short list: its callback runs only where the slot is present.
     fn short_walk(&mut self, s: &Rc<Short<'a>>, name: &str, f: &Val<'a>) -> Val<'a> {
+        // The walker below runs the callback with its effects, guarded by the list being
+        // non-empty; the element's value comes from running it once more, as the walker would.
         let (world, read_list) = (Val::Term(s.var, s.items.ty()), self.slot_list(s));
-        let applied = self.within(s.read, world, |l| {
-            l.walking.push(read_list);
-            let array = l.this_or(Val::Short(s.clone()));
-            let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), array]);
-            l.walking.pop();
-            out
-        });
+        let (outer, choices) = (self.state.cells.clone(), self.choices.len());
+        let applied = if matches!(s.keep, Val::Bool(false)) {
+            Val::Undef
+        } else {
+            self.speculate(|l| {
+                l.within(s.read, world, |l| {
+                    l.walking.push(read_list);
+                    let array = l.this_or(Val::Short(s.clone()));
+                    let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), array]);
+                    l.walking.pop();
+                    l.detach(out, &outer, choices)
+                })
+            })
+        };
         let kind = if name == "filter" { Walker::Filter } else { Walker::Map };
         let list = self.walker(kind, f, s.list);
         let mut next = Short { list, ..(**s).clone() };
@@ -455,6 +509,7 @@ impl<'a> Lowerer<'a, '_> {
     /// binders. An unknown callback stays opaque. The result's elements are the callback's
     /// values for a map, and the list's own otherwise.
     pub fn walker(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> Seq {
+        let (state, this) = (self.state.clone(), self.this_or(list.val()));
         let (lam, items) = match f {
             Val::Fun(_) => self.callback(kind, f, list),
             other => {
@@ -470,9 +525,17 @@ impl<'a> Lowerer<'a, '_> {
             Walker::Some => Core::Some([lam, list.id]),
         });
         if kind == Walker::Map && matches!(f, Val::Fun(_)) {
-            self.maps.insert(node, (f.clone(), list));
+            // Arrays the callback built do not count; arrays that outlive it do.
+            let writes = self.state.cells.iter().any(|(k, v)| match state.cells.get(k) {
+                Some(old) => !old.identical(v),
+                None => matches!(k, super::value::RefKey::Input(_)),
+            });
+            self.maps.insert(node, super::value::Mapping { f: f.clone(), base: list, this, state, writes });
             if std::mem::take(&mut self.built) {
                 self.fresh.insert(node);
+            }
+            if std::mem::take(&mut self.passed) {
+                self.passes.insert(node);
             }
         }
         Seq { id: node, items: if kind == Walker::Map { items } else { list.items } }
@@ -485,11 +548,13 @@ impl<'a> Lowerer<'a, '_> {
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
         let before = self.next_ref;
-        let result = self.repeat(list.id, |l| l.apply(f.clone(), args));
+        let result = self.repeat(list.id, 1, |l| l.apply(f.clone(), args));
         self.walking.pop();
-        // A callback that returns an array it just built builds a new one for every element.
+        // A callback that returns an array it just built builds a new one for every element;
+        // one that returns its element passes the list's elements through.
         self.built = matches!(result, Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)))
             || matches!(result, Val::Ref(super::value::RefKey::Local(k)) if k > before);
+        self.passed = matches!(result, Val::Term(id, _) if id == x);
         let items = Items::of(result.defined());
         let body = if kind == Walker::Map {
             self.escape(&result)
@@ -559,10 +624,11 @@ impl<'a> Lowerer<'a, '_> {
         let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
         let saved = std::mem::replace(&mut self.env, fun.env.clone());
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
-        // Recognizing a projection evaluates nothing; the walker that replaces it does.
-        let value = self.speculate(|l| l.bind_params(fun, args).then(|| l.expr(target)));
+        // Recognizing a projection evaluates nothing; the walker that replaces it does. The
+        // compared expression runs once per element, so one with effects is no projection.
+        let (value, pure) = self.probe(|l| l.bind_params(fun, args).then(|| l.expr(target)));
         self.env = saved;
-        let Some(Val::Num(form)) = value else { return None };
+        let (Some(Val::Num(form)), true) = (value, pure) else { return None };
         if form.terms.keys().any(|&a| self.b.mentions(a, x) || self.b.mentions(a, i)) {
             return None;
         }
@@ -615,7 +681,9 @@ impl<'a> Lowerer<'a, '_> {
         self.members.insert(x, list.id);
         let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
-        let body = self.repeat(list.id, |l| l.apply(f.clone(), args));
+        // Without a seed, the callback first runs on the second element.
+        let least = if init.is_some() { 1 } else { 2 };
+        let body = self.repeat(list.id, least, |l| l.apply(f.clone(), args));
         self.walking.pop();
         let body = self.emit(&body);
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
@@ -641,6 +709,14 @@ impl<'a> Lowerer<'a, '_> {
             Some(Val::Num(f)) => f,
             Some(_) => return self.unsupported(),
         };
+        // Known bounds that select nothing: an end at or before a non-negative start, or an end
+        // of zero after a start counted from the end.
+        let known_end = if open { None } else { end.known() };
+        if let (Some(a), Some(z)) = (start.known(), known_end)
+            && ((a >= 0 && z >= 0 && z <= a) || (a < 0 && z == 0))
+        {
+            return Val::empty();
+        }
         // slice(-k) keeps at most the last k elements.
         let tail = start.known().filter(|&k| open && k < 0).map(|k| -k);
         let drift = start.terms.keys().chain(end.terms.keys()).any(|a| self.coords.contains_key(a));
@@ -717,8 +793,10 @@ impl<'a> Lowerer<'a, '_> {
     /// The kept elements: each element's keep decides, in every world of its splits,
     /// whether the element is appended, and a symbolic keep appends it conditionally.
     fn filter_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>) -> Val<'a> {
-        let keeps = self.each(items, f);
-        items.iter().zip(keeps).fold(Val::empty(), |acc, (item, keep)| {
+        let list = self.this_or(Val::List(items.clone()));
+        (0..items.len()).fold(Val::empty(), |acc, k| {
+            let Some(item) = self.item_at(items, k) else { return acc };
+            let keep = self.apply(f.clone(), vec![item.clone(), index(k), list.clone()]);
             let keep = self.truthy_split(keep);
             self.lift2(acc, keep, Family::Propagate, &mut |l, acc, keep| match keep {
                 Val::Bool(false) => acc,
@@ -733,7 +811,11 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// The first element the callback accepts, or undefined.
     fn find_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, k: usize) -> Val<'a> {
-        let Some(item) = items.get(k).cloned() else { return Val::Undef };
+        if k >= items.len() {
+            return Val::Undef;
+        }
+        // find reads every index up to the starting length, present or not.
+        let item = self.item_at(items, k).unwrap_or(Val::Undef);
         let list = self.this_or(Val::List(items.clone()));
         let v = self.apply(f.clone(), vec![item.clone(), Val::int(i64::try_from(k).unwrap_or(i64::MAX)), list]);
         let truth = self.truthy_split(v);
@@ -742,8 +824,8 @@ impl<'a> Lowerer<'a, '_> {
             Val::Bool(false) => l.find_items(items, f, k + 1),
             Val::Throw => Val::Throw,
             t => {
-                let (found, rest) =
-                    l.fork(&mut |l, second| if second { l.find_items(items, f, k + 1) } else { l.settle(item.clone()) }, &mut |l, a, b| l.select(&t, a, b));
+                let join = super::refs::Join::Test { test: t.clone(), first_if: true };
+                let (found, rest) = l.fork(&mut |l, second| if second { l.find_items(items, f, k + 1) } else { l.settle(item.clone()) }, &join);
                 l.select(&t, found, rest)
             }
         })
@@ -767,4 +849,8 @@ fn slice_items<'a>(items: &Rc<Vec<Val<'a>>>, start: Option<&Val<'a>>, end: Optio
     };
     let (from, to) = (usize::try_from(bound(start, 0)?).ok()?, usize::try_from(bound(end, len)?).ok()?);
     Some(Val::List(Rc::new(items.get(from..to.max(from)).unwrap_or(&[]).to_vec())))
+}
+
+fn index<'a>(k: usize) -> Val<'a> {
+    Val::int(i64::try_from(k).unwrap_or(i64::MAX))
 }

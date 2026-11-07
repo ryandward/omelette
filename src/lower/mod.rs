@@ -114,16 +114,18 @@ pub struct Lowerer<'a, 'l> {
     coords: HashMap<Id, Id>,
     /// Each element binder, with the list it is an element of.
     members: HashMap<Id, Id>,
-    /// The identity of an array recomputed at a place: a list term and an index.
-    places: HashMap<(Id, Id), value::RefKey>,
     /// Mapped lists whose callback builds a new array for every element.
     fresh: std::collections::HashSet<Id>,
+    /// Mapped lists whose callback returns its element.
+    passes: std::collections::HashSet<Id>,
     /// Whether the last walker callback lowered returned an array it built.
     built: bool,
+    /// Whether the last walker callback lowered returned its element.
+    passed: bool,
     /// The lists whose walkers' callbacks are being lowered: each is non-empty there.
     walking: Vec<Id>,
-    /// Each mapped list, with its callback and the list it maps.
-    maps: HashMap<Id, (Val<'a>, value::Seq)>,
+    /// Each mapped list, with what reading its elements needs.
+    maps: HashMap<Id, value::Mapping<'a>>,
     depth: usize,
     /// See [`Lowered::opaque`].
     opaque: bool,
@@ -135,6 +137,12 @@ pub struct Lowerer<'a, 'l> {
     next_ref: u32,
     /// The receiver of the list method being lowered, which its callbacks receive.
     this: Option<Val<'a>>,
+    /// The references being resolved into a term, innermost last.
+    resolving: Vec<value::RefKey>,
+    /// The references whose contents some term holds.
+    embedded: std::collections::HashSet<value::RefKey>,
+    /// Each reference's contents, resolved, during one emission.
+    resolved: HashMap<value::RefKey, Val<'a>>,
 }
 
 impl<'l> Lowerer<'_, 'l> {
@@ -148,9 +156,10 @@ impl<'l> Lowerer<'_, 'l> {
             elems: HashMap::new(),
             coords: HashMap::new(),
             members: HashMap::new(),
-            places: HashMap::new(),
             fresh: std::collections::HashSet::new(),
+            passes: std::collections::HashSet::new(),
             built: false,
+            passed: false,
             walking: Vec::new(),
             maps: HashMap::new(),
             depth: 0,
@@ -159,6 +168,9 @@ impl<'l> Lowerer<'_, 'l> {
             choices: Vec::new(),
             next_ref: 0,
             this: None,
+            resolving: Vec::new(),
+            embedded: std::collections::HashSet::new(),
+            resolved: HashMap::new(),
         }
     }
 }

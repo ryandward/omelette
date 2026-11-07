@@ -97,6 +97,9 @@ pub enum RefKey {
     Local(u32),
     /// One of two references, chosen by a symbolic test.
     Choice(usize),
+    /// The array lowering recomputes at a place, a list term and an index: a mapped list's
+    /// element. One key in every world.
+    Place(Id, Id),
 }
 
 /// A value that depends on whether `read` is present: `absent` where it is missing, and
@@ -128,6 +131,19 @@ pub struct Short<'a> {
     pub keep: Val<'a>,
     /// The slot's index came from another collection's walker.
     pub drift: bool,
+}
+
+/// A mapped list: its callback, the list it maps, the receiver the callback saw as its
+/// array, and the store when the map ran, so reading an element reruns the callback as the
+/// map did. `writes` says the callback wrote to arrays, so an element's value depends on the
+/// elements before it.
+#[derive(Clone)]
+pub struct Mapping<'a> {
+    pub f: Val<'a>,
+    pub base: Seq,
+    pub this: Val<'a>,
+    pub state: super::refs::State<'a>,
+    pub writes: bool,
 }
 
 /// A function value: its parameters, body, and the bindings it closed over.
