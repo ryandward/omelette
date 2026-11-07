@@ -76,6 +76,8 @@ impl<'a> Lowerer<'a, '_> {
         match name {
             "undefined" => return Val::Undef,
             "NaN" => return Val::NaN,
+            // A function's own arguments object, which lowering does not model.
+            "arguments" => return self.unsupported(),
             _ => {}
         }
         let kind = self.kinds.get(name).copied().unwrap_or(Kind::Any);

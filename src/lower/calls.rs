@@ -135,6 +135,29 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// What a list method does before it runs, when that decides it: a callback that is not
+    /// a function throws, and `flat` is modeled at depth one, or zero, which copies.
+    fn precheck(&mut self, receiver: &Val<'a>, name: &str, args: &[Val<'a>]) -> Option<Val<'a>> {
+        let first = args.first();
+        if matches!(name, "map" | "filter" | "find" | "every" | "some" | "reduce" | "flatMap") && first.is_none_or(not_callable) {
+            return Some(Val::Throw);
+        }
+        if name != "flat" {
+            return None;
+        }
+        match first.map(|d| match d {
+            Val::Undef => Some(1),
+            Val::Num(f) => f.known(),
+            _ => None,
+        }) {
+            None | Some(Some(1)) => None,
+            Some(Some(0)) => Some(match receiver {
+                Val::List(items) => Val::List(Rc::new(items.to_vec())),
+                other => other.clone(),
+            }),
+            Some(_) => Some(self.unsupported()),
+        }
+    }
     /// Bind each `const` declarator once its initializer is evaluated, then run the rest.
     fn declare(&mut self, declarators: &'a [oxc_ast::ast::VariableDeclarator<'a>], rest: &[&'a Statement<'a>]) -> Val<'a> {
         let Some((first, others)) = declarators.split_first() else { return self.run(rest) };
@@ -145,6 +168,11 @@ impl<'a> Lowerer<'a, '_> {
         })
     }
     fn method(&mut self, receiver: Val<'a>, name: &str, args: &[Val<'a>]) -> Val<'a> {
+        if receiver.items().is_some()
+            && let Some(early) = self.precheck(&receiver, name, args)
+        {
+            return early;
+        }
         match receiver {
             Val::List(items) => self.literal_method(&items, name, args),
             Val::Short(s) => self.short_method(&s, name, args),
@@ -554,6 +582,12 @@ impl<'a> Lowerer<'a, '_> {
         }
         out
     }
+}
+
+/// A value calling which certainly throws.
+fn not_callable(v: &Val<'_>) -> bool {
+    matches!(v, Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Str(_) | Val::List(_) | Val::Short(_))
+        || matches!(v, Val::Term(_, Ty::Bool | Ty::Str | Ty::List(_)))
 }
 
 /// A filtered list holding at most the element read by `slot`, with that element's value

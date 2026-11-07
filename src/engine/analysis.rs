@@ -144,7 +144,7 @@ fn logic(g: &Graph, n: &Core) -> Option<bool> {
             (Some(false), Some(false)) => Some(false),
             _ => None,
         },
-        Core::Eq([a, b]) => Some(strict_eq(g[*a].data.constant.as_ref()?, g[*b].data.constant.as_ref()?)),
+        Core::Eq([a, b]) => strict_eq(g[*a].data.constant.as_ref()?, g[*b].data.constant.as_ref()?),
         _ => None,
     }
 }
@@ -160,8 +160,14 @@ fn order(g: &Graph, a: Id, b: Id, strict: bool) -> Option<bool> {
     a.lo.zip(b.hi).is_some_and(|(l, h)| fails(l, h)).then_some(false)
 }
 
-fn strict_eq(a: &Const, b: &Const) -> bool {
-    !matches!((a, b), (Const::NaN, _) | (_, Const::NaN)) && a == b
+/// Strict equality of two constants: `NaN` equals nothing, and two empty lists are equal only
+/// if they are one object, which their values cannot tell.
+fn strict_eq(a: &Const, b: &Const) -> Option<bool> {
+    match (a, b) {
+        (Const::NaN, _) | (_, Const::NaN) => Some(false),
+        (Const::Nil, Const::Nil) => None,
+        _ => Some(a == b),
+    }
 }
 
 fn text(g: &Graph, id: Id) -> Option<Utf16> {

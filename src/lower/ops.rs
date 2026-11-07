@@ -121,8 +121,10 @@ impl<'a> Lowerer<'a, '_> {
             Bin::Eq => l.strict_eq(&a, &b),
         })
     }
+    /// `a + b`: concatenation when an operand is a string or a list, and otherwise numeric
+    /// addition with booleans coerced.
     fn add(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
-        if is_text(&a) || is_text(&b) {
+        if is_text(&a) || is_text(&b) || a.items().is_some() || b.items().is_some() {
             let (a, b) = (self.to_text(a), self.to_text(b));
             return self.concat(&a, &b);
         }
@@ -130,7 +132,13 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         let (Some(lhs), Some(rhs)) = (numeric(a), numeric(b)) else {
-            return if poisons(a) || poisons(b) { Val::NaN } else { self.dynamic(op_name(op), &[a, b], Ty::Defined) };
+            // `undefined` and `NaN` make arithmetic NaN, but `+` concatenates when the other
+            // operand may be a string.
+            let poisoned = match op {
+                Bin::Add => (poisons(a) && numeric_typed(b)) || (poisons(b) && numeric_typed(a)),
+                _ => poisons(a) || poisons(b),
+            };
+            return if poisoned { Val::NaN } else { self.dynamic(op_name(op), &[a, b], Ty::Defined) };
         };
         let form = match op {
             Bin::Sub => lhs.plus(&rhs, -1),
@@ -152,9 +160,9 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// `a < b` (strict) or `a <= b`.
     fn order(&mut self, strict: bool, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
-        if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
-            let gap = y.plus(&x, -1).and_then(|d| d.plus(&Form::constant(i64::from(strict)), -1));
-            return gap.map_or(Val::Bool(false), |d| self.b.nonnegative(&d));
+        let gap = numeric(a).zip(numeric(b)).and_then(|(x, y)| y.plus(&x, -1)?.plus(&Form::constant(i64::from(strict)), -1));
+        if let Some(d) = gap.filter(exact) {
+            return self.b.nonnegative(&d);
         }
         if poisons(a) || poisons(b) {
             return Val::Bool(false);
@@ -169,13 +177,13 @@ impl<'a> Lowerer<'a, '_> {
 
 impl<'a> Lowerer<'a, '_> {
     pub fn strict_eq(&mut self, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
-        if let Some(known) = same(a, b) {
+        if let Some(known) = same(a, b).or_else(|| identical_object(a, b)) {
             return Val::Bool(known);
         }
-        if let (Some(x), Some(y)) = (numeric_only(a), numeric_only(b)) {
-            let gap = y.plus(&x, -1).unwrap_or_default();
-            let (up, down) = (self.b.nonnegative(&gap), gap.scale(-1).map(|g| self.b.nonnegative(&g)));
-            return down.map_or(Val::Bool(false), |down| self.and(up, down));
+        let gap = numeric_only(a).zip(numeric_only(b)).and_then(|(x, y)| y.plus(&x, -1));
+        if let Some((up, down)) = gap.filter(exact).and_then(|g| Some((g.scale(-1)?, g))) {
+            let (up, down) = (self.b.nonnegative(&up), self.b.nonnegative(&down));
+            return self.and(up, down);
         }
         if distinct_types(a, b) {
             return Val::Bool(false);
@@ -282,9 +290,24 @@ fn is_text(v: &Val<'_>) -> bool {
     matches!(v, Val::Str(_) | Val::Term(_, Ty::Str))
 }
 
-/// Operands whose arithmetic is NaN whatever the other operand is.
+/// Operands whose arithmetic is NaN.
 fn poisons(v: &Val<'_>) -> bool {
     matches!(v, Val::Undef | Val::NaN)
+}
+
+/// Operands `+` adds rather than concatenates.
+fn numeric_typed(v: &Val<'_>) -> bool {
+    matches!(v, Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Term(_, Ty::Bool))
+}
+
+/// Strict equality of two objects lowering built: the same object, or two different ones.
+fn identical_object(a: &Val<'_>, b: &Val<'_>) -> Option<bool> {
+    match (a, b) {
+        (Val::List(x), Val::List(y)) => Some(Rc::ptr_eq(x, y)),
+        (Val::Short(x), Val::Short(y)) => Some(Rc::ptr_eq(x, y)),
+        (Val::Fun(x), Val::Fun(y)) => Some(Rc::ptr_eq(x, y)),
+        _ => None,
+    }
 }
 
 /// The integer a value coerces to, when arithmetic on it stays affine.
@@ -322,8 +345,9 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
     }
 }
 
-/// JavaScript numbers are exact integers only up to 2^53 - 1 in magnitude.
+/// JavaScript numbers are exact integers only up to 2^53 - 1 in magnitude, so a form whose
+/// constant or coefficient lies beyond that is not folded.
 fn exact(f: &Form) -> bool {
     const SAFE: i64 = 9_007_199_254_740_991;
-    f.known().is_none_or(|v| v.abs() <= SAFE)
+    std::iter::once(f.constant).chain(f.terms.values().copied()).all(|v| v.abs() <= SAFE)
 }

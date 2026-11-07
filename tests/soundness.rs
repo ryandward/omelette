@@ -187,3 +187,43 @@ fn evaluating_what_is_not_modeled_leaves_the_value_unknown() {
         checked(source, Verdict::Undecided);
     }
 }
+
+#[test]
+fn plus_concatenates_undefined_next_to_a_possible_string() {
+    cheat("names[i] + undefined", &[Family::Sink]);
+    cheat("((pre) => pre + names[i])()", &[Family::Sink]);
+    value("undefined + []", "utf16:0075006e0064006500660069006e00650064");
+    let r = checked("undefined + y", Verdict::NoCheat);
+    assert_ne!(r.canonical.to_string(), "nan");
+}
+
+#[test]
+fn arguments_is_not_a_free_list() {
+    checked("(function (a) { return arguments[0]; })(xs[i] ?? 0)", Verdict::Undecided);
+    checked("xs.map(function () { return arguments[1] ?? 0; })", Verdict::Undecided);
+}
+
+#[test]
+fn integer_overflow_is_never_a_constant() {
+    for source in ["i * 9007199254740991 * 1024 < 1 - i * 9007199254740991 * 1024", "i * 9007199254740991 * 1024 === 1 - i * 9007199254740991 * 1024"] {
+        let r = checked(source, Verdict::NoCheat);
+        assert!(!matches!(r.canonical.to_string().as_str(), "true" | "false"), "{source}: {}", r.canonical);
+    }
+}
+
+#[test]
+fn lists_compare_by_identity() {
+    value("[] === []", "false");
+    value("((a) => a === a)([])", "true");
+    cheat("[] === [] ? 0 : xs[i] ?? 0", &[Family::Default]);
+}
+
+#[test]
+fn list_methods_check_their_arguments() {
+    value("[[1]].flat(0).length", "1");
+    checked("[[[1]]].flat(2)", Verdict::Undecided);
+    checked("groups.slice(i, i + 1).flat(0)", Verdict::NoCheat);
+    for source in ["[].map()", "[].some(1)", "[1, 2].reduce()", "[].filter()"] {
+        value(source, "throw");
+    }
+}
