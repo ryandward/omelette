@@ -46,15 +46,19 @@ define_language! {
         "fold" = Fold([Id; 3]),
         "join" = Join([Id; 2]),
         "flat" = Flat(Id),
-        // A read that may be missing, and one proven in range.
+        // A read that may be missing, one proven in range, and whether `xs[k]` is in range.
         "read" = Read([Id; 2]),
         "at" = At([Id; 2]),
-        // maybe z (x. f) read, tagged with the flow that produced it: the evidence.
-        "maybe" = Maybe([Id; 4]),
+        "has" = Has([Id; 2]),
+        // maybe z (x. f) read, tagged with the flow that produced it: the evidence. Its last
+        // child is the read's `has`: a read's class also holds its value, which a present
+        // `undefined` element shares with every missing read.
+        "maybe" = Maybe([Id; 5]),
         // The same value without the tag, where spellings of one value meet.
-        "elim" = Elim([Id; 3]),
-        // A possibly missing read left as a hole in a collection shaped like another.
-        "escape" = Escape(Id),
+        "elim" = Elim([Id; 4]),
+        // A possibly missing read (its value, then its `has`) left as a hole in a collection
+        // shaped like another.
+        "escape" = Escape([Id; 2]),
         // A call of a function lowering could not resolve: callee, then arguments.
         "call" = Call(Box<[Id]>),
         Int(i64),
@@ -115,8 +119,6 @@ pub enum Family {
     Container,
     /// What an operator makes of undefined: ===, <, +, !.
     Sink,
-    /// The absence is observed, not replaced: `=== undefined`.
-    Observe,
     /// The absence passes through: the absent side is still undefined.
     Propagate,
     /// The absent side depends on an unknown that may itself be undefined.
@@ -126,12 +128,11 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Default,
         Self::Unit,
         Self::Container,
         Self::Sink,
-        Self::Observe,
         Self::Propagate,
         Self::Undecided,
         Self::Drift,
@@ -142,7 +143,6 @@ impl Family {
             Self::Unit => "unit",
             Self::Container => "container",
             Self::Sink => "sink",
-            Self::Observe => "observe",
             Self::Propagate => "propagate",
             Self::Undecided => "undecided",
             Self::Drift => "drift",

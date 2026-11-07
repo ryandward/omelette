@@ -1,7 +1,7 @@
 //! Witness detection: which flows swallow a read that may be missing.
-use super::analysis::{Const, Graph, in_range};
+use super::analysis::{Const, Graph, decided};
 use crate::core::{Core, Family, Kind};
-use egg::{Id, Language};
+use egg::{Id, Language, Symbol};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Default)]
@@ -14,16 +14,33 @@ pub struct Findings {
     pub opaque: bool,
 }
 
+/// A witness `maybe(flow, z, lam, read, has)`.
+type Witness = [Id; 5];
+
+/// What the judgments share: the root, and the classes with a representative free of
+/// unknowns, and of throws.
+struct Context {
+    root: Id,
+    known: HashSet<Id>,
+    throwless: HashSet<Id>,
+}
+
 /// Judge the classes the root's value depends on. A class with a known constant depends on
-/// nothing, and neither does a conditional's dead arm or a walker's callback over an empty
-/// list, so detection does not descend into them.
+/// nothing, and neither does a conditional's dead arm, a witness's dead side, or a walker's
+/// callback over an empty list, so detection does not descend into them. A witness or escape
+/// counts only if the root has no representative that avoids its class.
 pub fn scan(g: &Graph, root: Id) -> Findings {
-    let known = avoiding(g, |n| {
+    let unknown = |_: Id, n: &Core| {
         matches!(n, Core::Call(_) | Core::Unsupported(_)) || matches!(n, Core::Var(v) if matches!(v.kind, Kind::Any | Kind::Fun))
-    });
+    };
+    let ctx = Context {
+        root: g.find(root),
+        known: avoiding(g, unknown),
+        throwless: avoiding(g, |_, n| matches!(n, Core::Throw)),
+    };
     let mut found = Findings::default();
     let mut seen = HashSet::new();
-    let mut stack = vec![root];
+    let mut stack = vec![ctx.root];
     while let Some(id) = stack.pop() {
         let id = g.find(id);
         if !seen.insert(id) || g[id].data.constant.is_some() {
@@ -31,10 +48,12 @@ pub fn scan(g: &Graph, root: Id) -> Findings {
         }
         for n in &g[id].nodes {
             stack.extend(live(g, n));
-            visit(g, n, &mut found);
+            visit(g, &ctx, id, n, &mut found);
         }
         for group in witnesses(g, id).values() {
-            judge(g, &known, group, &mut found);
+            if relevant(g, &ctx, id) {
+                judge(g, &ctx, group, &mut found);
+            }
         }
     }
     found
@@ -42,15 +61,16 @@ pub fn scan(g: &Graph, root: Id) -> Findings {
 
 /// The children a node's value depends on.
 fn live(g: &Graph, n: &Core) -> Vec<Id> {
-    let decided = |c: Id| match g[c].data.constant {
-        Some(Const::Bool(b)) => Some(b),
-        _ => None,
-    };
     let empty = |xs: Id| g[xs].data.constant == Some(Const::Nil);
     match n {
-        Core::If([c, yes, no]) => match decided(*c) {
+        Core::If([c, yes, no]) => match decided(g, *c) {
             Some(b) => vec![if b { *yes } else { *no }],
             None => vec![*c, *yes, *no],
+        },
+        Core::Maybe([flow, z, lam, read, has]) => match decided(g, *has) {
+            Some(true) => vec![*lam, *read],
+            Some(false) => vec![*z],
+            None => vec![*flow, *z, *lam, *read, *has],
         },
         Core::Map([_, xs]) | Core::Filter([_, xs]) | Core::Every([_, xs]) | Core::Some([_, xs]) if empty(*xs) => vec![],
         Core::Fold([_, z, xs]) if empty(*xs) => vec![*z],
@@ -58,9 +78,10 @@ fn live(g: &Graph, n: &Core) -> Vec<Id> {
     }
 }
 
-fn visit(g: &Graph, n: &Core, found: &mut Findings) {
+fn visit(g: &Graph, ctx: &Context, id: Id, n: &Core, found: &mut Findings) {
     match n {
-        Core::Escape(v) if hole(g, *v) => {
+        // Lowering escapes only reads whose replacement is still undefined.
+        Core::Escape([_, has]) if decided(g, *has).is_none() && relevant(g, ctx, id) => {
             found.families.insert(Family::Drift);
         }
         Core::Unsupported(_) | Core::Call(_) => found.opaque = true,
@@ -71,12 +92,17 @@ fn visit(g: &Graph, n: &Core, found: &mut Findings) {
     }
 }
 
-/// One class's witnesses, grouped by read.
-fn witnesses(g: &Graph, id: Id) -> HashMap<Id, Vec<[Id; 4]>> {
-    let mut groups: HashMap<Id, Vec<[Id; 4]>> = HashMap::new();
+/// Whether the root's value goes through class `id` in every representative.
+fn relevant(g: &Graph, ctx: &Context, id: Id) -> bool {
+    id == ctx.root || !avoiding(g, |class, _| class == id).contains(&ctx.root)
+}
+
+/// One class's witnesses, grouped by read and presence test.
+fn witnesses(g: &Graph, id: Id) -> HashMap<(Id, Id), Vec<Witness>> {
+    let mut groups: HashMap<(Id, Id), Vec<Witness>> = HashMap::new();
     for n in &g[id].nodes {
         if let Core::Maybe(parts) = n {
-            groups.entry(g.find(parts[3])).or_default().push(*parts);
+            groups.entry((g.find(parts[3]), g.find(parts[4]))).or_default().push(*parts);
         }
     }
     groups
@@ -86,9 +112,8 @@ fn witnesses(g: &Graph, id: Id) -> HashMap<Id, Vec<[Id; 4]>> {
 /// where the read is missing and their present branches agree on every element: one
 /// representative's proof that the branch ignores the element, that it is free of unknowns,
 /// or that the replacement is certainly a value, holds for all of them.
-fn judge(g: &Graph, known: &HashSet<Id>, group: &[[Id; 4]], found: &mut Findings) {
-    let read = group[0][3];
-    if !undetermined(g, read) {
+fn judge(g: &Graph, ctx: &Context, group: &[Witness], found: &mut Findings) {
+    if decided(g, group[0][4]).is_some() {
         return;
     }
     let families: BTreeSet<Family> = group.iter().filter_map(|&[flow, ..]| family(g, flow)).collect();
@@ -99,34 +124,42 @@ fn judge(g: &Graph, known: &HashSet<Id>, group: &[[Id; 4]], found: &mut Findings
     if swallowing.is_empty() {
         return;
     }
-    let observed = group.iter().any(|&[_, _, lam, _]| ignores_element(g, lam));
-    let visible = group.iter().any(|&[_, z, ..]| empty(g, z)) && group.iter().any(|&[_, _, lam, _]| nonempty_body(g, lam));
-    if observed || visible {
-        return;
+    let visible = group.iter().any(|&[_, z, ..]| empty(g, z)) && group.iter().any(|&[_, _, lam, ..]| nonempty_body(g, lam));
+    match observation(g, group) {
+        _ if visible => return,
+        Some(true) => return,
+        // The branch ignores this read's element but reads the same list another way, which
+        // may be the same element.
+        Some(false) => {
+            found.possible = true;
+            return;
+        }
+        None => {}
     }
     // An unknown function or value may make the branch ignore the element (`p = () => false`)
     // or test its presence (`p = () => true`, or `n === x` with `x` undefined).
-    let resolved = group.iter().any(|&[_, _, lam, _]| bodies(g, lam).any(|body| known.contains(&g.find(body))));
+    let resolved = group.iter().any(|&[_, _, lam, ..]| bodies(g, lam).any(|body| ctx.known.contains(&g.find(body))));
     // An element that may itself be undefined: a branch that varies only there conflates the
     // missing read with that element, not with an ordinary value, and detection cannot tell
     // the two apart.
-    let ordinary = !group.iter().any(|&[_, _, lam, _]| binds(g, lam, Kind::Item));
-    if resolved && ordinary && group.iter().any(|&[_, z, ..]| certain(g, z)) {
+    let ordinary = !group.iter().any(|&[_, _, lam, ..]| binds(g, lam, Kind::Item));
+    // A replacement that may throw is a world where the read was not evaluated, or where it
+    // throws: nothing is swallowed there.
+    let certain = group.iter().any(|&[_, z, ..]| certain(g, z) && ctx.throwless.contains(&g.find(z)));
+    if resolved && ordinary && certain {
         found.families.extend(swallowing);
     } else {
         found.possible = true;
     }
 }
 
-/// Classes with a representative that contains no node `bad` picks. `known` avoids
-/// unknowns: unresolved calls, unsupported syntax, and free variables that may be any value
-/// or any function.
-fn avoiding(g: &Graph, bad: impl Fn(&Core) -> bool) -> HashSet<Id> {
+/// Classes with a representative that contains no node `bad` picks (given the node's class).
+fn avoiding(g: &Graph, bad: impl Fn(Id, &Core) -> bool) -> HashSet<Id> {
     let mut free = HashSet::new();
     loop {
         let before = free.len();
         for class in g.classes() {
-            let clean = |n: &Core| !bad(n) && n.children().iter().all(|&c| free.contains(&g.find(c)));
+            let clean = |n: &Core| !bad(class.id, n) && n.children().iter().all(|&c| free.contains(&g.find(c)));
             if !free.contains(&class.id) && class.nodes.iter().any(clean) {
                 free.insert(class.id);
             }
@@ -142,18 +175,6 @@ fn family(g: &Graph, flow: Id) -> Option<Family> {
         Core::Flow(f) => Some(*f),
         _ => None,
     })
-}
-
-/// A value that is undefined where a read not proven in or out of range is missing: the
-/// read itself, or a witness over it whose replacement is undefined.
-fn hole(g: &Graph, id: Id) -> bool {
-    let undefined = |z: Id| g[z].data.constant == Some(Const::Undef);
-    undetermined(g, id) || g[id].nodes.iter().any(|n| matches!(n, Core::Maybe([_, z, _, r]) if undefined(*z) && undetermined(g, *r)))
-}
-
-/// A read not proven in or out of range.
-fn undetermined(g: &Graph, id: Id) -> bool {
-    g[id].nodes.iter().any(|n| matches!(n, Core::Read(_))) && in_range(g, id).is_none()
 }
 
 /// The lambda's body, for each lambda in its class.
@@ -172,20 +193,71 @@ fn binds(g: &Graph, lam: Id, kind: Kind) -> bool {
     })
 }
 
-/// The present branch has a representative that does not mention the element: the absence
-/// is only observed.
-fn ignores_element(g: &Graph, lam: Id) -> bool {
-    g[lam].nodes.iter().any(|n| {
-        let Core::Lam(children) = n else { return false };
-        let (Some(&binder), Some(&body)) = (children.first(), children.last()) else { return false };
-        let Some(var) = g[binder].nodes.iter().find_map(|n| match n {
-            Core::Var(v) => Some(*v),
-            _ => None,
-        }) else {
-            return false;
-        };
-        avoiding(g, |n| matches!(n, Core::Var(v) if *v == var)).contains(&g.find(body))
+/// Whether the present branch observes the absence rather than replacing it: `Some(true)`
+/// when a representative of its body mentions neither the element nor another read of a
+/// list that shares one of the read's free lists, `Some(false)` when it avoids the element
+/// only by such a read, and `None` when it depends on the element.
+fn observation(g: &Graph, group: &[Witness]) -> Option<bool> {
+    let mine: HashSet<Symbol> = group.iter().flat_map(|&[.., read, _]| read_lists(g, read)).collect();
+    let mut loose = false;
+    for &[_, _, lam, ..] in group {
+        for n in &g[lam].nodes {
+            let Core::Lam(children) = n else { continue };
+            let (Some(&binder), Some(&body)) = (children.first(), children.last()) else { continue };
+            let Some(var) = variable(g, binder) else { continue };
+            let element = |n: &Core| matches!(n, Core::Var(v) if *v == var);
+            let aliased = |n: &Core| match n {
+                Core::Read([l, _]) | Core::At([l, _]) => !lists(g, *l).is_disjoint(&mine),
+                _ => false,
+            };
+            let body = g.find(body);
+            if avoiding(g, |_, n| element(n) || aliased(n)).contains(&body) {
+                return Some(true);
+            }
+            loose |= avoiding(g, |_, n| element(n)).contains(&body);
+        }
+    }
+    loose.then_some(false)
+}
+
+fn variable(g: &Graph, id: Id) -> Option<crate::core::Variable> {
+    g[id].nodes.iter().find_map(|n| match n {
+        Core::Var(v) => Some(*v),
+        _ => None,
     })
+}
+
+/// The free lists a read's class reads from.
+fn read_lists(g: &Graph, read: Id) -> HashSet<Symbol> {
+    g[read]
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            Core::Read([l, _]) => Some(lists(g, *l)),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The free list variables a term mentions in any representative.
+fn lists(g: &Graph, id: Id) -> HashSet<Symbol> {
+    let (mut out, mut seen, mut stack) = (HashSet::new(), HashSet::new(), vec![id]);
+    while let Some(id) = stack.pop() {
+        let id = g.find(id);
+        if !seen.insert(id) {
+            continue;
+        }
+        for n in &g[id].nodes {
+            match n {
+                Core::Var(v) if v.kind == Kind::List => {
+                    out.insert(v.name);
+                }
+                n => stack.extend(n.children()),
+            }
+        }
+    }
+    out
 }
 
 /// The present branch is a non-empty list, so it never yields the empty replacement.

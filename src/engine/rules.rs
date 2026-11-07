@@ -1,5 +1,5 @@
 //! Equational laws over the core IR. No rule simulates JavaScript.
-use super::analysis::{Facts, Graph, class_form, form_of, in_range, int, range_tests};
+use super::analysis::{Const, Facts, Graph, class_form, form_of, int};
 use crate::affine::Form;
 use crate::core::Core;
 use egg::{Applier, Id, PatternAst, Rewrite, Subst, Symbol, Var, rewrite as rw};
@@ -47,7 +47,8 @@ fn lists() -> Vec<Rule> {
         rw!("len-cons"; "(len (cons ?h ?t))" => { Sum(&["1", "?t"]) }),
         rw!("len-append"; "(len (append ?a ?b))" => { Sum(&["?a", "?b"]) }),
         rw!("len-map"; "(len (map ?f ?xs))" => "(len ?xs)"),
-        rw!("read"; "(read ?xs ?k)" => Expand),
+        rw!("read"; "(read ?xs ?k)" => "(if (has ?xs ?k) (at ?xs ?k) undefined)"),
+        rw!("has"; "(has ?xs ?k)" => Range),
         rw!("at-head"; "(at (cons ?h ?t) 0)" => "?h"),
         rw!("map-nil"; "(map ?f nil)" => "nil"),
         rw!("filter-nil"; "(filter ?f nil)" => "nil"),
@@ -63,13 +64,14 @@ fn lists() -> Vec<Rule> {
 /// List identities that reveal a witness: `[...a, z][0]` and `[z, ...xs][xs.length]`.
 fn witnesses() -> Vec<Rule> {
     vec![
-        rw!("append-default"; "(read (append ?a (cons ?z ?t)) 0)" => "(maybe default ?z (lam elem:@0 elem:@0) (read ?a 0))"),
+        rw!("append-default"; "(read (append ?a (cons ?z ?t)) 0)" => "(maybe default ?z (lam elem:@0 elem:@0) (read ?a 0) (has ?a 0))"),
         rw!("prefix-last"; "(read (cons ?z ?xs) (len ?xs))" => Last),
-        rw!("maybe-absent"; "(maybe ?fam ?z ?f ?r)" => "?z" if absent("?r")),
-        rw!("maybe-present"; "(maybe ?fam ?z (lam ?e ?b) ?r)" => "?b" if present("?r", "?b")),
-        rw!("maybe-value"; "(maybe ?fam ?z ?f ?r)" => "(elim ?z ?f ?r)"),
-        rw!("presence-absent"; "(maybe ?fam (if ?c ?a ?b) ?f ?r)" => "(maybe ?fam ?b ?f ?r)" if presence("?r", "?c")),
-        rw!("presence-present"; "(maybe ?fam ?z (lam ?e (if ?c ?a ?b)) ?r)" => "(maybe ?fam ?z (lam ?e ?a) ?r)" if presence("?r", "?c")),
+        rw!("maybe-absent"; "(maybe ?fam ?z ?f ?r ?h)" => "?z" if decided("?h", false)),
+        rw!("maybe-present"; "(maybe ?fam ?z (lam ?e ?b) ?r ?h)" => "?b" if decided("?h", true) if constant("?b")),
+        rw!("maybe-read"; "(maybe ?fam ?z (lam ?e ?e) ?r ?h)" => "?r" if decided("?h", true)),
+        rw!("maybe-value"; "(maybe ?fam ?z ?f ?r ?h)" => "(elim ?z ?f ?r ?h)"),
+        rw!("presence-absent"; "(maybe ?fam (if ?h ?a ?b) ?f ?r ?h)" => "(maybe ?fam ?b ?f ?r ?h)"),
+        rw!("presence-present"; "(maybe ?fam ?z (lam ?e (if ?h ?a ?b)) ?r ?h)" => "(maybe ?fam ?z (lam ?e ?a) ?r ?h)"),
     ]
 }
 
@@ -150,10 +152,10 @@ impl Applier<Core, Facts> for Sum {
     }
 }
 
-/// `xs[k]` is the element where `0 <= k < len(xs)`, and undefined elsewhere.
+/// `has(xs, k)` is `0 <= k and 0 <= len(xs) - k - 1`.
 #[derive(Clone)]
-struct Expand;
-impl Applier<Core, Facts> for Expand {
+struct Range;
+impl Applier<Core, Facts> for Range {
     fn apply_one(&self, g: &mut Graph, id: Id, s: &Subst, _: Option<&PatternAst<Core>>, _: Symbol) -> Vec<Id> {
         let (xs, k) = (s[var("?xs")], s[var("?k")]);
         let index = class_form(g, k);
@@ -165,11 +167,8 @@ impl Applier<Core, Facts> for Expand {
         let (k_form, room) = (add_form(g, &index), add_form(g, &room));
         let low = g.add(Core::Le([zero, k_form]));
         let high = g.add(Core::Le([zero, room]));
-        let present = g.add(Core::And([low, high]));
-        let at = g.add(Core::At([xs, k]));
-        let undef = g.add(Core::Undef);
-        let expanded = g.add(Core::If([present, at, undef]));
-        unite(g, id, expanded)
+        let test = g.add(Core::And([low, high]));
+        unite(g, id, test)
     }
 }
 
@@ -183,9 +182,10 @@ impl Applier<Core, Facts> for Last {
         let Some(last) = class_form(g, len).plus(&Form::constant(1), -1) else { return vec![] };
         let last = add_form(g, &last);
         let read = g.add(Core::Read([xs, last]));
+        let has = g.add(Core::Has([xs, last]));
         let identity = identity(g);
         let flow = g.add(Core::Flow(crate::core::Family::Default));
-        let maybe = g.add(Core::Maybe([flow, z, identity, read]));
+        let maybe = g.add(Core::Maybe([flow, z, identity, read, has]));
         unite(g, id, maybe)
     }
 }
@@ -195,23 +195,14 @@ fn identity(g: &mut Graph) -> Id {
     g.add(Core::Lam(vec![elem, elem].into()))
 }
 
-/// The read is proven out of range.
-fn absent(r: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
-    let r = var(r);
-    move |g, _, s| in_range(g, s[r]) == Some(false)
+/// The presence test `h` is the constant `value`.
+fn decided(h: &str, value: bool) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let h = var(h);
+    move |g, _, s| g[s[h]].data.constant == Some(Const::Bool(value))
 }
 
-/// The read is proven in range and the present branch `b` is a constant.
-fn present(r: &str, b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
-    let (r, b) = (var(r), var(b));
-    move |g, _, s| in_range(g, s[r]) == Some(true) && g[s[b]].data.constant.is_some()
-}
-
-/// `c` is the read's presence test.
-fn presence(r: &str, c: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
-    let (r, c) = (var(r), var(c));
-    move |g, _, s| {
-        let test = g.find(s[c]);
-        range_tests(g, s[r]).any(|t| t == test)
-    }
+/// The class `b` has a known constant.
+fn constant(b: &str) -> impl Fn(&mut Graph, Id, &Subst) -> bool {
+    let b = var(b);
+    move |g, _, s| g[s[b]].data.constant.is_some()
 }

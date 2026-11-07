@@ -6,15 +6,15 @@ use omelette::engine::Verdict;
 #[test]
 fn each_family_has_its_canonical_witness() {
     for (source, family, witness) in [
-        ("names[i] ?? 'x'", Family::Default, "(maybe default utf16:0078 (lam elem:@1 elem:@1) (read list:names int:i))"),
-        ("names[i] !== 'off'", Family::Sink, "(maybe sink true (lam elem:@1 (not (eq elem:@1 utf16:006f00660066))) (read list:names int:i))"),
-        ("names[i] === 'on'", Family::Sink, "(maybe sink false (lam elem:@1 (eq elem:@1 utf16:006f006e)) (read list:names int:i))"),
+        ("names[i] ?? 'x'", Family::Default, "(maybe default utf16:0078 (lam elem:@1 elem:@1) (read list:names int:i) (has list:names int:i))"),
+        ("names[i] !== 'off'", Family::Sink, "(maybe sink true (lam elem:@1 (not (eq elem:@1 utf16:006f00660066))) (read list:names int:i) (has list:names int:i))"),
+        ("names[i] === 'on'", Family::Sink, "(maybe sink false (lam elem:@1 (eq elem:@1 utf16:006f006e)) (read list:names int:i) (has list:names int:i))"),
         (
             "names.slice(i, i + 1).join('')",
             Family::Unit,
-            "(maybe unit utf16: (lam elem:@1 (text elem:@1)) (read (slice list:names int:i (lin 1 1 int:i)) 0))",
+            "(maybe unit utf16: (lam elem:@1 (text elem:@1)) (read (slice list:names int:i (lin 1 1 int:i)) 0) (has (slice list:names int:i (lin 1 1 int:i)) 0))",
         ),
-        ("users.map((_, i) => roles[i])", Family::Drift, "(map (lam elem:@1 index:@2 (escape (read list:roles index:@2))) list:users)"),
+        ("users.map((_, i) => roles[i])", Family::Drift, "(map (lam elem:@1 index:@2 (escape (read list:roles index:@2) (has list:roles index:@2))) list:users)"),
     ] {
         let r = cheat(source, &[family]);
         assert_eq!(r.canonical.to_string(), witness, "{source}");

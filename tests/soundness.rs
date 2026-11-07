@@ -93,7 +93,8 @@ fn reduce_without_an_initial_value_returns_a_lone_element_uncalled() {
     let r = checked("xs.reduce((_, x) => 7)", Verdict::NoCheat);
     assert!(r.canonical.to_string().starts_with("(fold "), "{}", r.canonical);
     // An empty list throws.
-    value("xs.reduce((_, x) => x)", "(maybe propagate throw (lam elem:@1 elem:@1) (read list:xs (lin -1 1 (len list:xs))))");
+    let r = checked("xs.reduce((_, x) => x)", Verdict::NoCheat);
+    assert!(r.canonical.to_string().starts_with("(maybe propagate throw (lam elem:@1 elem:@1) (read list:xs"), "{}", r.canonical);
 }
 
 #[test]

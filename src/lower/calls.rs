@@ -439,7 +439,10 @@ impl<'a> Lowerer<'a, '_> {
     fn escape(&mut self, v: &Val<'a>) -> Id {
         let id = self.b.emit(v);
         match v {
-            Val::Split(s) if s.drift && matches!(s.absent, Val::Undef) => self.b.add(Core::Escape(id)),
+            Val::Split(s) if s.drift && matches!(s.absent, Val::Undef) => {
+                let has = self.b.has(s.read);
+                self.b.add(Core::Escape([id, has]))
+            }
             _ => id,
         }
     }

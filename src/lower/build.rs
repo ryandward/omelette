@@ -1,7 +1,7 @@
 //! Interned construction of core terms and emission of lowered values.
 use super::value::{Split, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family, Kind, Utf16, Variable};
+use crate::core::{Core, Kind, Utf16, Variable};
 use egg::{Id, Language, RecExpr, Symbol};
 use std::collections::HashMap;
 
@@ -112,15 +112,15 @@ impl Builder {
         }
         let absent = self.emit(&s.absent);
         let present = self.emit(&s.present);
-        // A present side that ignores the element only observes whether it is there.
-        let family = if s.family.swallows() && !self.mentions(present, s.elem) {
-            Family::Observe
-        } else {
-            s.family
-        };
-        let flow = self.add(Core::Flow(family));
+        let flow = self.add(Core::Flow(s.family));
         let lam = self.add(Core::Lam(vec![s.elem, present].into()));
-        self.add(Core::Maybe([flow, absent, lam, s.read]))
+        let has = self.has(s.read);
+        self.add(Core::Maybe([flow, absent, lam, s.read, has]))
+    }
+    /// The presence test of a read node.
+    pub fn has(&mut self, read: Id) -> Id {
+        let Core::Read(children) = self.out[read] else { unreachable!("a split's read is a read node") };
+        self.add(Core::Has(children))
     }
     pub fn text(&mut self, s: Utf16) -> Id {
         self.add(Core::Str(s))
