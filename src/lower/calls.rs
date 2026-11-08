@@ -790,6 +790,17 @@ impl<'a> Lowerer<'a, '_> {
     /// `list.reduce(f, init)`. A callback that ignores its accumulator yields its value on the
     /// last element, or the initial value for an empty list.
     fn reduce(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+        // A callback that reads its accumulator does not ignore it, so it is a fold.
+        let reads_acc = match f {
+            Val::Fun(fun) => fun.params.items.first().is_some_and(|p| match &p.pattern {
+                BindingPattern::BindingIdentifier(id) => !self.scoping.get_resolved_reference_ids(id.symbol_id()).is_empty(),
+                _ => true,
+            }),
+            _ => false,
+        };
+        if reads_acc {
+            return self.fold(list, f, init);
+        }
         let len = Form::atom(self.b.add(Core::Len(list.id)));
         let final_index = len.plus(&Form::constant(1), -1).unwrap_or_default();
         let slot = self.element(list, &final_index);
@@ -827,15 +838,19 @@ impl<'a> Lowerer<'a, '_> {
         let (x, i) = (self.b.element(list.items), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         self.members.insert(x, list.id);
-        let ty = self.accumulator(&Each { list, f: f.clone(), x, i }, init.as_ref());
-        let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
-        let args = vec![Val::Term(acc, ty), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
-        self.walking.push(list.id);
-        // Without a seed, the callback first runs on the second element.
-        let least = if init.is_some() { 1 } else { 2 };
-        let body = self.repeat(list.id, least, |l| l.apply(f.clone(), args));
-        self.walking.pop();
-        let body = self.emit(&body);
+        let walk = Each { list, f: f.clone(), x, i };
+        let (acc, ty, body) = if let Some(typed) = self.pure_fold(&walk, init.as_ref()) {
+            typed
+        } else {
+            let acc = self.b.fresh(Kind::Acc);
+            let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
+            self.walking.push(list.id);
+            // Without a seed, the callback first runs on the second element.
+            let least = if init.is_some() { 1 } else { 2 };
+            let body = self.repeat(list.id, least, |l| l.apply(f.clone(), args));
+            self.walking.pop();
+            (acc, Ty::Any, self.emit(&body))
+        };
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
         let init = match init {
             Some(z) => self.emit(&z),
@@ -858,48 +873,53 @@ impl<'a> Lowerer<'a, '_> {
             v => super::expr::static_ty(&v),
         }
     }
-    /// The accumulator's type: one the seed (or, without one, the first element) has, and
-    /// every result of the callback keeps. The callback runs on an accumulator of the type
-    /// so far until its result fits, which a few rounds settle; numbers, which a fold may
-    /// carry past the integers, stay untyped. A list term is a value, not an array with an
-    /// identity, so only a callback without effects, which cannot mutate or keep the
-    /// accumulator, gets a typed one.
-    fn accumulator(&mut self, walk: &Each<'a>, init: Option<&Val<'a>>) -> Ty {
-        let (list, f, x, i) = (walk.list, &walk.f, walk.x, walk.i);
-        let seed = init.cloned().unwrap_or(Val::Term(x, list.items.ty()));
-        let Some(mut ty) = self.static_type(seed) else { return Ty::Any };
-        // The probe's accumulator is an array with identity, so mutating or keeping it is an
-        // effect; the store is as it was afterward.
+    /// A fold whose callback has no effects: the accumulator's binder, its type, and the
+    /// callback's result on it. The type is one the seed (or, without one, the first element)
+    /// has and every result keeps: the callback runs on an accumulator of the type so far
+    /// until its result fits, which a few rounds settle, and the run that confirms the type
+    /// gives the body. The first run's accumulator is an array with identity, so a callback
+    /// that mutates or keeps it has effects: a list term is a value, not an array with an
+    /// identity, so only such a callback's accumulator is typed. Numbers, which a fold may
+    /// carry past the integers, are not. `None` when the callback has effects or the type
+    /// does not settle.
+    fn pure_fold(&mut self, walk: &Each<'a>, init: Option<&Val<'a>>) -> Option<(Id, Ty, Id)> {
+        let seed = init.cloned().unwrap_or(Val::Term(walk.x, walk.list.items.ty()));
+        let mut ty = self.static_type(seed)?;
         let saved = self.state.clone();
-        let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
-        let acc = self.own(Val::Term(acc, ty));
-        let args = vec![acc, Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
-        let ((), pure) = self.probe(|l| {
-            l.walking.push(list.id);
-            l.apply(f.clone(), args);
-            l.walking.pop();
-        });
+        let mut acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
+        let owned = self.own(Val::Term(acc, ty));
+        let (mut body, mut next, mut effects) = self.speculate(|l| l.fold_step(walk, owned));
         self.state = saved;
-        if !pure {
-            return Ty::Any;
-        }
         for _ in 0..3 {
-            let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
-            let args = vec![Val::Term(acc, ty), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
-            // An array the callback returns is typed by what it holds.
-            let result = self.speculate(|l| {
-                l.walking.push(list.id);
-                let result = l.apply(f.clone(), args);
-                l.walking.pop();
-                l.static_type(result)
-            });
-            match super::expr::combine(Some(ty), result) {
-                Some(next) if next == ty => return ty,
-                Some(next) => ty = next,
-                None => return Ty::Any,
+            if effects {
+                return None;
             }
+            let grown = super::expr::combine(Some(ty), next)?;
+            if grown == ty {
+                return Some((acc, ty, body));
+            }
+            ty = grown;
+            acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
+            (body, next, effects) = self.speculate(|l| l.fold_step(walk, Val::Term(acc, ty)));
         }
-        Ty::Any
+        None
+    }
+    /// The callback on an accumulator: its result, emitted, its static type, and whether it
+    /// had an effect outside itself: a write to an array that outlives it, a logged mutation,
+    /// an escape, or something lowering does not model. Binding a list parameter gives it an
+    /// identity, which no one outside sees.
+    fn fold_step(&mut self, walk: &Each<'a>, acc: Val<'a>) -> (Id, Option<Ty>, bool) {
+        let (before, opaque) = (self.state.clone(), self.opaque);
+        let args = vec![acc, Val::Term(walk.x, walk.list.items.ty()), Val::Num(Form::atom(walk.i)), self.this_or(walk.list.val())];
+        self.walking.push(walk.list.id);
+        let result = self.apply(walk.f.clone(), args);
+        self.walking.pop();
+        let effects = !self.written_since(&before).is_empty()
+            || !self.state.log.identical(&before.log)
+            || !Rc::ptr_eq(&self.state.escaped, &before.escaped)
+            || self.opaque != opaque;
+        let body = self.emit(&result);
+        (body, self.static_type(result), effects)
     }
     /// `list.slice(start, end)`, whose bounds count from the end when negative. Bounds that
     /// differ by `d >= 0` keep at most `d` elements whatever their signs, so a difference of
