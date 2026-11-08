@@ -3,12 +3,12 @@ use super::value::{Items, Split, Val};
 use crate::affine::Form;
 use crate::core::{Core, Kind, Known, Shape, Utf16, Variable, items_of, shape_of};
 use egg::{Id, Language, RecExpr, Symbol};
-use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Builder {
     out: RecExpr<Core>,
-    intern: HashMap<Core, Id>,
+    /// Every node added, for sharing; hashed fast, since nodes are small and many.
+    intern: rustc_hash::FxHashMap<Core, Id>,
     fresh: u32,
     /// Each term's shape and, for a list, its elements' shape, as the analysis computes them.
     facts: Vec<(Shape, Shape)>,

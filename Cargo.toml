@@ -13,6 +13,7 @@ oxc_parser = "0.157"
 oxc_semantic = "0.157"
 oxc_span = "0.157"
 oxc_syntax = "0.157"
+rustc-hash = "2.1"
 
 [lints.rust]
 unsafe_code = "forbid"
