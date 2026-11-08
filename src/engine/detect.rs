@@ -1,7 +1,8 @@
 //! Witness detection: which flows swallow a read that may be missing.
 use super::analysis::{Const, Graph, decided};
-use crate::core::{Core, Family, Kind, Mutator};
+use crate::core::{Core, Family, Kind, Mutator, Shape};
 use egg::{Id, Language, Symbol};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Default)]
@@ -126,13 +127,19 @@ fn judge(g: &Graph, ctx: &Context, group: &[Witness], found: &mut Findings) {
     if families.contains(&Family::Undecided) {
         found.possible = true;
     }
+    if apart(g, group) {
+        return;
+    }
+    // Passing the absence on as `undefined` is honest only where no present element yields
+    // `undefined` too, which `apart` proves when it holds.
+    if families.contains(&Family::Propagate) {
+        found.possible = true;
+    }
     let swallowing: Vec<Family> = families.into_iter().filter(|f| f.swallows()).collect();
     if swallowing.is_empty() {
         return;
     }
-    let visible = group.iter().any(|&[_, z, ..]| empty(g, z)) && group.iter().any(|&[_, _, lam, ..]| nonempty_body(g, lam));
     match observation(g, group) {
-        _ if visible => return,
         Some(true) => return,
         // The branch ignores this read's element but reads the same list another way, which
         // may be the same element.
@@ -248,6 +255,11 @@ fn read_lists(g: &Graph, read: Id) -> HashSet<Symbol> {
 
 /// The free list variables a term mentions in any representative.
 fn lists(g: &Graph, id: Id) -> HashSet<Symbol> {
+    free(g, id, |v| v.kind == Kind::List)
+}
+
+/// The free variables `pick` accepts that a term mentions in any representative.
+fn free(g: &Graph, id: Id, pick: impl Fn(&crate::core::Variable) -> bool) -> HashSet<Symbol> {
     let (mut out, mut seen, mut stack) = (HashSet::new(), HashSet::new(), vec![id]);
     while let Some(id) = stack.pop() {
         let id = g.find(id);
@@ -256,8 +268,10 @@ fn lists(g: &Graph, id: Id) -> HashSet<Symbol> {
         }
         for n in &g[id].nodes {
             match n {
-                Core::Var(v) if v.kind == Kind::List => {
-                    out.insert(v.name);
+                Core::Var(v) => {
+                    if pick(v) {
+                        out.insert(v.name);
+                    }
                 }
                 n => stack.extend(n.children()),
             }
@@ -266,33 +280,123 @@ fn lists(g: &Graph, id: Id) -> HashSet<Symbol> {
     out
 }
 
-/// The present branch is a non-empty list, so it never yields the empty replacement.
-fn nonempty_body(g: &Graph, lam: Id) -> bool {
-    bodies(g, lam).any(|body| g[body].nodes.iter().any(|n| matches!(n, Core::Cons(_))))
+/// The replacement is a value the present branch never yields, so the missing read stays
+/// visible in the result rather than erased into an ordinary one. Witnesses in a group denote
+/// one value, so any replacement may face any branch.
+fn apart(g: &Graph, group: &[Witness]) -> bool {
+    let read = group.iter().flat_map(|&[.., read, has]| [read, has]).flat_map(|id| free(g, id, |_| true)).collect();
+    let apart = Apart { g, read, known: RefCell::default(), fixed: RefCell::default() };
+    group.iter().any(|&[_, z, ..]| group.iter().any(|&[_, _, lam, ..]| bodies(g, lam).any(|body| apart.distinct(z, body, true))))
 }
 
-fn empty(g: &Graph, z: Id) -> bool {
-    g[z].nodes.iter().any(|n| matches!(n, Core::Nil))
+/// Compares a replacement with a present branch, given the variables the read depends on.
+/// Comparisons are remembered, so shared classes are compared once; one still under way when
+/// it is reached again counts as not apart, which only makes the answer more cautious.
+struct Apart<'g> {
+    g: &'g Graph,
+    read: HashSet<Symbol>,
+    known: RefCell<HashMap<(Id, Id, bool), bool>>,
+    fixed: RefCell<HashMap<Id, bool>>,
 }
 
-/// A replacement that is certainly a value, never undefined: a defined constant, or a node
-/// whose every value is defined. Anything not listed here may be undefined.
-fn certain(g: &Graph, z: Id) -> bool {
-    let class = &g[z];
-    if let Some(c) = &class.data.constant {
-        return *c != Const::Undef;
+impl Apart<'_> {
+    /// Whether `z` differs from every value `body` takes. Splitting either at a conditional
+    /// compares each arm, whatever its test. A test that shares no variable with the read is
+    /// fixed while the read varies, so where both split on it, each side is compared under
+    /// it; there, a world where the whole replacement and the whole branch are one term never
+    /// evaluates the read and erases nothing. A test on the read's variables may be its
+    /// presence, which differs between the two sides, so it splits only one of them.
+    fn distinct(&self, z: Id, body: Id, whole: bool) -> bool {
+        let g = self.g;
+        let (z, body) = (g.find(z), g.find(body));
+        if z == body {
+            return whole;
+        }
+        if let Some(&known) = self.known.borrow().get(&(z, body, whole)) {
+            return known;
+        }
+        self.known.borrow_mut().insert((z, body, whole), false);
+        let apart = self.compare(z, body, whole);
+        self.known.borrow_mut().insert((z, body, whole), apart);
+        apart
     }
-    class.nodes.iter().any(|n| match n {
-        Core::Var(v) => !matches!(v.kind, Kind::Any | Kind::Acc | Kind::Item),
-        n => matches!(
-            n,
-            Core::NaN | Core::True | Core::False | Core::Nil | Core::Int(_) | Core::Str(_)
-                | Core::Lin(_) | Core::Mul(_) | Core::Le(_) | Core::Lt(_) | Core::Not(_) | Core::And(_) | Core::Or(_) | Core::Eq(_)
-                | Core::Concat(_) | Core::Text(_) | Core::Dyn(_) | Core::Cons(_) | Core::Append(_) | Core::Slice(_) | Core::Len(_)
-                | Core::Map(_) | Core::Filter(_) | Core::Every(_) | Core::Some(_) | Core::Join(_) | Core::Flat(_)
-                | Core::Sort(_) | Core::Reverse(_)
-        ),
-    })
+
+    fn compare(&self, z: Id, body: Id, whole: bool) -> bool {
+        let g = self.g;
+        if self.direct(z, body) {
+            return true;
+        }
+        if let Some(Const::Str(text)) = &g[z].data.constant
+            && self.affixes(&text.units(), body, 6)
+        {
+            return true;
+        }
+        // Lists differ where their heads or their tails do.
+        let cells = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::Cons(c) = n { Some(*c) } else { None });
+        if cells(z).any(|[zh, zt]| cells(body).any(|[bh, bt]| self.distinct(zh, bh, false) || self.distinct(zt, bt, false))) {
+            return true;
+        }
+        let arms = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::If([c, y, n]) = n { Some((g.find(*c), *y, *n)) } else { None });
+        let joint = arms(z).any(|(c, zy, zn)| {
+            self.fixed(c) && arms(body).any(|(d, by, bn)| d == c && self.distinct(zy, by, whole) && self.distinct(zn, bn, whole))
+        });
+        joint
+            || arms(body).any(|(_, y, n)| self.distinct(z, y, false) && self.distinct(z, n, false))
+            || arms(z).any(|(_, y, n)| self.distinct(y, body, false) && self.distinct(n, body, false))
+    }
+
+    /// Whether a test shares no variable with the read, so it stays fixed while the read varies.
+    fn fixed(&self, test: Id) -> bool {
+        if let Some(&fixed) = self.fixed.borrow().get(&test) {
+            return fixed;
+        }
+        let fixed = free(self.g, test, |_| true).is_disjoint(&self.read);
+        self.fixed.borrow_mut().insert(test, fixed);
+        fixed
+    }
+
+    /// Whether the text `z` differs from every string `body` takes: `body` joins a constant
+    /// prefix `z` does not start with, or a constant suffix it does not end with, or the rest
+    /// of `z` differs from the rest of `body`.
+    fn affixes(&self, z: &[u16], body: Id, depth: u8) -> bool {
+        let text = |id: Id| match &self.g[id].data.constant {
+            Some(Const::Str(units)) => Some(units.units()),
+            _ => None,
+        };
+        let rest = |rest: &[u16], id: Id| depth > 0 && self.affixes(rest, id, depth - 1);
+        self.g[body].nodes.iter().any(|node| {
+            let Core::Concat([left, right]) = node else { return false };
+            match (text(*left), text(*right)) {
+                (Some(prefix), _) => z.strip_prefix(prefix.as_slice()).is_none_or(|tail| rest(tail, *right)),
+                (_, Some(suffix)) => z.strip_suffix(suffix.as_slice()).is_none_or(|head| rest(head, *left)),
+                _ => false,
+            }
+        }) || text(body).is_some_and(|whole| whole != z)
+    }
+
+    /// Whether `z` differs from every value `body` takes, by their facts alone: a type the
+    /// body never has, another constant, a value outside the integers or the bounds the body
+    /// keeps to, or the empty list where the body always builds one.
+    fn direct(&self, z: Id, body: Id) -> bool {
+        let g = self.g;
+        let (zd, bd) = (&g[z].data, &g[body].data);
+        if !zd.shape.meets(bd.shape) {
+            return true;
+        }
+        let Some(c) = &zd.constant else { return false };
+        let outside = match c {
+            Const::Int(v) => bd.lo.is_some_and(|l| *v < l) || bd.hi.is_some_and(|h| *v > h),
+            // Only integers have bounds.
+            _ => bd.lo.is_some() || bd.hi.is_some(),
+        };
+        let built = *c == Const::Nil && g[body].nodes.iter().any(|n| matches!(n, Core::Cons(_)));
+        outside || built || bd.constant.as_ref().is_some_and(|d| d != c)
+    }
+}
+
+/// A replacement that is certainly a value, never undefined.
+fn certain(g: &Graph, z: Id) -> bool {
+    !g[z].data.shape.meets(Shape::UNDEF)
 }
 
 /// The live mutations in an effect log: those of arrays someone outside the expression holds,

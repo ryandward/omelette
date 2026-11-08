@@ -28,8 +28,11 @@ impl Builder {
         self.add(if b { Core::True } else { Core::False })
     }
     pub fn var(&mut self, kind: Kind, name: &str) -> Id {
+        self.shaped_var(kind, name, kind.shape())
+    }
+    pub fn shaped_var(&mut self, kind: Kind, name: &str, shape: crate::core::Shape) -> Id {
         let name = Symbol::from(name);
-        self.add(Core::Var(Variable { kind, name }))
+        self.add(Core::Var(Variable { kind, name, shape }))
     }
     /// A binder no other term mentions.
     pub fn fresh(&mut self, kind: Kind) -> Id {

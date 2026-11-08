@@ -2,7 +2,7 @@
 use super::Lowerer;
 use super::value::{Split, Ty, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family, Utf16};
+use crate::core::{Core, Family, Shape, Utf16};
 use egg::Id;
 use std::rc::Rc;
 
@@ -176,7 +176,7 @@ impl<'a> Lowerer<'a, '_> {
                 Bin::Add => (poisons(a) && numeric_typed(b)) || (poisons(b) && numeric_typed(a)),
                 _ => poisons(a) || poisons(b),
             };
-            return if poisoned { Val::NaN } else { self.dynamic(op_name(op), &[a, b], Ty::Defined) };
+            return if poisoned { Val::NaN } else { self.shaped(op_name(op), &[a, b], Ty::Defined, arithmetic(op)) };
         };
         let form = match op {
             Bin::Sub => lhs.plus(&rhs, -1),
@@ -189,7 +189,7 @@ impl<'a> Lowerer<'a, '_> {
         };
         match form {
             Some(f) if exact(&f) => Val::Num(f),
-            _ => self.dynamic(op_name(op), &[a, b], Ty::Defined),
+            _ => self.shaped(op_name(op), &[a, b], Ty::Defined, arithmetic(op)),
         }
     }
     fn product(&mut self, x: &Form, y: &Form) -> Val<'a> {
@@ -306,13 +306,29 @@ impl<'a> Lowerer<'a, '_> {
             }
         }
     }
-    /// An operation lowering resolved to no known type; it never yields undefined.
+    /// An operation lowering resolved to no known value, of static type `ty`.
     pub fn dynamic(&mut self, name: &str, args: &[&Val<'a>], ty: Ty) -> Val<'a> {
-        let mut children = vec![self.b.text(Utf16::new(name.encode_utf16()))];
+        let shape = match ty {
+            Ty::Bool => Shape::BOOL,
+            Ty::Str => Shape::STR,
+            Ty::List(_) => Shape::LIST,
+            Ty::Defined => Shape::DEFINED,
+            Ty::Any => Shape::ALL,
+        };
+        self.shaped(name, args, ty, shape)
+    }
+    /// [`Self::dynamic`], producing only values of `shape`.
+    pub fn shaped(&mut self, name: &str, args: &[&Val<'a>], ty: Ty, shape: Shape) -> Val<'a> {
+        let mut children = vec![self.b.text(Utf16::new(name.encode_utf16())), self.b.add(Core::Kinds(shape))];
         children.extend(args.iter().map(|v| self.emit(v)));
-        let node = if ty == Ty::Any { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
+        let node = if shape.meets(Shape::UNDEF) { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
         Val::Term(self.b.add(node), ty)
     }
+}
+
+/// What arithmetic produces: a number, or for `+` a string when it concatenates.
+fn arithmetic(op: Bin) -> Shape {
+    if op == Bin::Add { Shape::NUM.or(Shape::STR) } else { Shape::NUM }
 }
 
 fn op_name(op: Bin) -> &'static str {

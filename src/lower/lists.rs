@@ -193,13 +193,10 @@ impl<'a> Lowerer<'a, '_> {
             Val::List(items) => Val::int(i64::try_from(items.len()).unwrap_or(i64::MAX)),
             Val::Str(s) => Val::int(i64::try_from(s.units().len()).unwrap_or(i64::MAX)),
             Val::Short(s) => self.short_length(&s),
-            Val::Term(id, Ty::List(_)) => Val::Num(Form::atom(self.b.add(Core::Len(id)))),
-            Val::Term(_, Ty::Str) => match self.dynamic("length", &[&v], Ty::Defined) {
-                Val::Term(id, _) => Val::Num(Form::atom(id)),
-                other => other,
-            },
+            Val::Term(id, Ty::List(_) | Ty::Str) => Val::Num(Form::atom(self.b.add(Core::Len(id)))),
             Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Term(_, Ty::Bool) => Val::Undef,
             Val::Fun(_) => self.unsupported(),
+            // A number's or a boolean's length is undefined; anything else's may be anything.
             v => self.dynamic("length", &[&v], Ty::Any),
         }
     }

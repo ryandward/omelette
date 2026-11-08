@@ -22,7 +22,7 @@ cargo test --release
 cargo run --release --example latency -- 500 --check
 ```
 
-The command prints the absence verdict with its families, as in `verdict: CHEAT (sink)`, and the mutation verdict with its operations, as in `mutation: MUTATION (sort)`. When lowering evaluated something it does not model, it also prints `opaque: yes`: both verdicts are then `UNDECIDED` unless a cheat or a mutation is found, and the root is the value under the model's assumptions, not a claim about JavaScript's result. `--all` dumps every e-class. `--joint` saturates several expressions in one graph and prints the graph's consistency and each expression's class. Each free variable gets one precondition from its uses across all the expressions. In a consistent graph, a shared class proves the expressions equal. `scripts/check.sh` runs both sets of golden cases and fails on a verdict mismatch, a run that did not saturate, or an inconsistent graph. `scripts/differential.js` evaluates closed expressions (one per line) in both omelette and Node. It fails on an inconsistent graph, a run that fails, or a value omelette claims that Node does not produce; an opaque run claims none.
+The command prints the absence verdict with its families, as in `verdict: CHEAT (sink)`, and the mutation verdict with its operations, as in `mutation: MUTATION (sort)`. When lowering evaluated something it does not model, it also prints `opaque: yes`: both verdicts are then `UNDECIDED` unless a cheat or a mutation is found, and the root is the value under the model's assumptions, not a claim about JavaScript's result. `--all` dumps every e-class. `--joint` saturates several expressions in one graph and prints the graph's consistency and each expression's class. Each free variable gets one precondition from its uses across all the expressions. In a consistent graph, a shared class proves the expressions equal. `scripts/check.sh` runs both sets of golden cases and fails on a verdict mismatch, a run that did not saturate, or an inconsistent graph. `scripts/differential.js` evaluates closed expressions (one per line) in both omelette and Node. It fails on an inconsistent graph, a run that fails, or a value omelette claims that Node does not produce; an opaque run claims none. `scripts/erasure.js` checks verdicts the same way (see the image test).
 
 ```rust
 use omelette::core::Family;
@@ -46,12 +46,13 @@ Checked in this order:
    - its family swallows;
    - some witness of that class over that read has a replacement that is certainly a value, with no throw in it;
    - every representative of its present branch mentions the element, and some representative is free of unknown functions, unknown values, and unsupported syntax;
-   - its present branch is not a non-empty list against an empty replacement;
+   - its replacement is not apart from its present branch (see the image test below);
    - the element it reads cannot itself be `undefined`.
 
    An escape of such a read whose replacement is still `undefined` is drift.
 3. `UNDECIDED` if the answer depends on unknown inputs, or on something lowering does not model:
    - a witness's family is undecided, its replacement may itself be `undefined` or throw, its present branch holds an unknown, or the element it reads may itself be `undefined`;
+   - a witness passes the missing read on as `undefined`, but its present branch may produce `undefined` too: `xs[i] === undefined ? undefined : xs[i].length`, where a present `0` has no length;
    - a witness's present branch avoids the element only by reading the same free list another way, as in `xs[i] === undefined ? 0 : xs.slice(i, i + 1)[0]`, which may read that element;
    - lowering evaluated unsupported syntax, an unresolved call, a walker over an unknown callback, or a spread of a value of unknown type, anywhere in the expression;
    - such a construct reaches the result.
@@ -72,9 +73,18 @@ These are not cheats:
 - the read reaches the result unchanged: `names[i]`, `names[i] && names[i] !== 'off'`;
 - it stays visible in a container: `names.slice(i, i + 1).map((n) => n.length)`, `names[i] !== undefined ? [names[i]] : []`;
 - its absence is observed rather than replaced: `names[i] === undefined`, `names.filter((_, k) => k === i).length === 0`, or a present branch that ignores the element;
+- its replacement is a value the present branch never produces: `` names[i] === undefined ? -1 : `${names[i]}`.length ``, `names[i] === undefined ? 'none' : names[i] > 0`;
 - it throws when missing: `names[i].length`;
 - the index is proven in range: `names.map((n, i) => names[i])`, `xs.map((x) => xs[0] ?? 0)`;
 - the operation speaks for a whole list: `names.every((n) => n !== 'off')`, `names.join(', ')`.
+
+### The image test
+
+A fallback `z` erases the missing read exactly when `z` is also the result of some present element: `c(undefined)` lies in the image of `c` over present elements. Detection proves the opposite, that `z` is apart from the present branch, from facts the analysis keeps for every class. The facts are the JavaScript types a value can have (`undefined`, boolean, number, string, list, object, function), integer bounds, constants, the element types of lists, and the constant prefixes and suffixes of strings. A replacement is apart from a branch when it has a type the branch never has, is another constant, lies outside the integers or the bounds the branch keeps to, misses a prefix or suffix the branch's text always has, or is a list whose head or tail differs from every one the branch builds. A conditional in either is compared arm by arm. A condition that shares no variable with the read stays fixed while the read varies. Where the replacement and the branch both test such a condition, each side is compared under it, and a world where the two are one term never evaluates the read, so it erases nothing. A condition on the read's own variables may be its presence test, which differs between the two sides, so it never splits them.
+
+An input list's elements are never `undefined`, but nothing else is known about them: an element may be any value, including an object with any `length`. So `names[i] === undefined ? [] : names[i].length` is a cheat, because `{ length: [] }` is an element too.
+
+`scripts/erasure.js` checks verdicts against this definition. It takes expressions that mention `xs` only as `xs[i]` (and optionally a context `c`, `j`), evaluates each on a missing read and on a pool of present elements in Node, and fails on a `no cheat` where some element gives the missing read's result.
 
 Where an unknown decides the flow, the verdict is `UNDECIDED`. `names[i] === x` only tests presence when `x` is `undefined`. `xs.slice(i, i + 1).some(p)` does too when `p` always returns `true`, and it is constant when `p` always returns `false`.
 

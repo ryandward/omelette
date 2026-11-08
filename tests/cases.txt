@@ -78,3 +78,13 @@ CHEAT	groups.slice(i, i + 1).flat()
 CHEAT	groups.slice(i, i + 1).flatMap((g) => g)
 no cheat	groups.flat()
 no cheat	groups.slice(i, i + 1).map((g) => g)
+no cheat	names[i] === undefined ? 'none' : names[i] > 0
+no cheat	widths[i] === undefined ? -1 : (widths[i] ? 1 : 0)
+no cheat	names[i] === undefined ? -1 : `${names[i]}`.length
+CHEAT	names[i] === undefined ? 0 : `${names[i]}`.length
+no cheat	names[i] === undefined ? '' : `<${names[i]}>`
+no cheat	names[i] !== undefined ? [names[i], names[i]] : [0]
+CHEAT	names[i] === undefined ? [] : names[i].length
+UNDECIDED	names[i] === undefined ? undefined : names[i].length
+no cheat	c ? (names[i] === undefined ? 'x' : [names[i]]) : (names[i] === undefined ? 0 : [names[i]])
+CHEAT	names.length ? names[names.length - 1] : 0

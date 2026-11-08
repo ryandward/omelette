@@ -29,13 +29,14 @@ define_language! {
         "concat" = Concat([Id; 2]),
         // The text join writes for an element.
         "text" = Text(Id),
-        // An operation lowering resolved to no known type: never undefined, and its
-        // possibly undefined counterpart (`??` of an unknown with an unknown fallback).
+        // An operation lowering resolved to no known value: its name, the shape of what it
+        // can produce, then its operands. `dyn` never produces undefined; `dyn?` may.
         "dyn" = Dyn(Box<[Id]>),
         "dyn?" = DynUndef(Box<[Id]>),
         "cons" = Cons([Id; 2]),
         "append" = Append([Id; 2]),
         "slice" = Slice([Id; 3]),
+        // The length of a list or a string: an integer, never negative.
         "len" = Len(Id),
         // Binders, then the body.
         "lam" = Lam(Box<[Id]>),
@@ -76,6 +77,7 @@ define_language! {
         Str(Utf16),
         Flow(Family),
         Op(Mutator),
+        Kinds(Shape),
         Var(Variable),
     }
 }
@@ -261,6 +263,66 @@ impl FromStr for Mutator {
     }
 }
 
+/// The JavaScript types a value can have: a set over undefined, boolean, number (`NaN`
+/// included), string, list, other object, and function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Shape(u8);
+
+impl Shape {
+    pub const NONE: Self = Self(0);
+    pub const UNDEF: Self = Self(1);
+    pub const BOOL: Self = Self(2);
+    pub const NUM: Self = Self(4);
+    pub const STR: Self = Self(8);
+    pub const LIST: Self = Self(16);
+    pub const OBJ: Self = Self(32);
+    pub const FUN: Self = Self(64);
+    pub const ALL: Self = Self(127);
+    pub const DEFINED: Self = Self(126);
+    const LETTERS: [(char, Self); 7] =
+        [('u', Self::UNDEF), ('b', Self::BOOL), ('n', Self::NUM), ('s', Self::STR), ('l', Self::LIST), ('o', Self::OBJ), ('f', Self::FUN)];
+    #[must_use]
+    pub fn or(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+    #[must_use]
+    pub fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+    pub fn meets(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+    pub fn letters(self) -> String {
+        Self::LETTERS.iter().filter(|(_, s)| self.meets(*s)).map(|(c, _)| *c).collect()
+    }
+    pub fn parse(letters: &str) -> Option<Self> {
+        letters.chars().try_fold(Self::NONE, |shape, c| Self::LETTERS.iter().find(|(l, _)| *l == c).map(|(_, s)| shape.or(*s)))
+    }
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl Display for Shape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "shape:{}", self.letters())
+    }
+}
+
+impl FromStr for Shape {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        s.strip_prefix("shape:").and_then(Self::parse).ok_or_else(|| s.to_string())
+    }
+}
+
 /// What lowering knows about a variable: the model's precondition for a free one, or a
 /// binder introduced for a walker's callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -284,6 +346,16 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// What a variable of this kind can be, or for a list what its elements can be, before
+    /// any declared type narrows it. An input list's elements are never undefined.
+    pub fn shape(self) -> Shape {
+        match self {
+            Self::Int | Self::Index => Shape::NUM,
+            Self::List | Self::Elem => Shape::DEFINED,
+            Self::Fun => Shape::FUN,
+            Self::Any | Self::Item | Self::Acc => Shape::ALL,
+        }
+    }
     const ALL: [Self; 8] = [
         Self::Int,
         Self::List,
@@ -312,11 +384,28 @@ impl Kind {
 pub struct Variable {
     pub kind: Kind,
     pub name: Symbol,
+    /// What the variable's values can be, or for a list what its elements can be.
+    pub shape: Shape,
+}
+
+impl Variable {
+    /// What the variable's values can be.
+    pub fn values(self) -> Shape {
+        if self.kind == Kind::List { Shape::LIST } else { self.shape }
+    }
+    /// What its elements can be, when it is a list.
+    pub fn items(self) -> Shape {
+        if self.kind == Kind::List { self.shape } else { Shape::ALL }
+    }
 }
 
 impl Display for Variable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.kind.prefix(), self.name)
+        if self.shape == self.kind.shape() {
+            write!(f, "{}:{}", self.kind.prefix(), self.name)
+        } else {
+            write!(f, "{}.{}:{}", self.kind.prefix(), self.shape.letters(), self.name)
+        }
     }
 }
 
@@ -324,13 +413,15 @@ impl FromStr for Variable {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
         let (prefix, name) = s.split_once(':').ok_or("not a variable")?;
+        let (prefix, letters) = prefix.split_once('.').map_or((prefix, None), |(p, l)| (p, Some(l)));
         let kind = Kind::ALL
             .into_iter()
             .find(|k| k.prefix() == prefix)
             .ok_or("unknown kind")?;
-        Ok(Self {
-            kind,
-            name: Symbol::from(name),
-        })
+        let shape = match letters {
+            Some(letters) => Shape::parse(letters).ok_or("unknown shape")?,
+            None => kind.shape(),
+        };
+        Ok(Self { kind, name: Symbol::from(name), shape })
     }
 }
