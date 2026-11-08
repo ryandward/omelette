@@ -58,15 +58,17 @@ impl Builder {
     }
     /// A binder no other term mentions.
     pub fn fresh(&mut self, kind: Kind) -> Id {
+        self.fresh_shaped(kind, kind.shape())
+    }
+    /// A fresh binder whose values have `shape`.
+    pub fn fresh_shaped(&mut self, kind: Kind, shape: Shape) -> Id {
         self.fresh += 1;
         let name = format!("@{}", self.fresh);
-        self.var(kind, &name)
+        self.shaped_var(kind, &name, shape)
     }
     /// A fresh binder for an element of a list with these elements.
     pub fn element(&mut self, items: Items) -> Id {
-        self.fresh += 1;
-        let name = format!("@{}", self.fresh);
-        self.shaped_var(items.kind(), &name, items.0)
+        self.fresh_shaped(items.kind(), items.0)
     }
     /// A construct lowering does not model, kept distinct from every other.
     pub fn unsupported(&mut self) -> Id {
@@ -101,6 +103,20 @@ impl Builder {
     pub fn node(&self, id: Id) -> &Core {
         &self.out[id]
     }
+    /// Whether the term depends on a read that may be missing.
+    pub fn reads(&self, id: Id) -> bool {
+        let (mut seen, mut stack) = (std::collections::HashSet::new(), vec![id]);
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match &self.out[id] {
+                Core::Read(_) | Core::Maybe(_) | Core::Elim(_) | Core::Escape(_) => return true,
+                n => stack.extend(n.children()),
+            }
+        }
+        false
+    }
     /// Whether the term `id` mentions the term `var`.
     pub fn mentions(&self, id: Id, var: Id) -> bool {
         id == var || self.out[id].children().iter().any(|&c| self.mentions(c, var))
@@ -130,10 +146,19 @@ impl Builder {
             Val::Ref(_) => unreachable!("lowering resolves references before emitting"),
         }
     }
+    /// A list's cells. A read at another collection's coordinate that is still undefined
+    /// where missing leaves a hole there, however the list was built.
     fn list(&mut self, items: &[Val<'_>]) -> Id {
         let nil = self.add(Core::Nil);
         items.iter().rev().fold(nil, |tail, item| {
             let head = self.emit(item);
+            let head = match item {
+                Val::Split(s) if s.drift && matches!(s.absent, Val::Undef) => {
+                    let has = self.has(s.read);
+                    self.add(Core::Escape([head, has]))
+                }
+                _ => head,
+            };
             self.add(Core::Cons([head, tail]))
         })
     }

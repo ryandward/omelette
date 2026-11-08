@@ -59,9 +59,13 @@ fn a_local_array_handed_to_the_caller_is_theirs() {
 #[test]
 fn code_lowering_cannot_see_leaves_mutation_undecided_and_values_unknown() {
     assert_eq!(mutation("f(xs)"), Mutation::Undecided);
-    let r = evaluate("(() => { const a = [0]; [1, 2].forEach((x) => a.push(x)); return a; })()").unwrap();
+    let r = evaluate("(() => { const a = [0]; for (const x of [1, 2]) a.push(x); return a; })()").unwrap();
     assert_eq!(r.mutation, Mutation::Undecided);
     assert_ne!(r.canonical.to_string(), "(cons 0 nil)");
+    // `forEach` is modeled: it pushes onto an array only the expression holds.
+    let r = evaluate("(() => { const a = [0]; [1, 2].forEach((x) => a.push(x)); return a; })()").unwrap();
+    assert_eq!(r.mutation, Mutation::None);
+    assert_eq!(r.canonical.to_string(), "(cons 0 (cons 1 (cons 2 nil)))");
 }
 
 #[test]

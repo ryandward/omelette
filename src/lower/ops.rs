@@ -338,16 +338,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::List(_) | Val::Short(_) | Val::Ref(_) => Shape::LIST,
             Val::Fun(_) | Val::Builtin(_) => Shape::FUN,
             Val::Split(s) => self.shape(&s.absent).or(self.shape(&s.present)),
-            Val::Term(id, ty) => {
-                let typed = match ty {
-                    Ty::Bool => Shape::BOOL,
-                    Ty::Str => Shape::STR,
-                    Ty::List(_) => Shape::LIST,
-                    Ty::Defined => Shape::DEFINED,
-                    Ty::Any => Shape::ALL,
-                };
-                self.b.shape(*id).and(typed)
-            }
+            Val::Term(id, ty) => self.b.shape(*id).and(ty.shape()),
         }
     }
     pub fn to_text(&mut self, v: Val<'a>) -> Val<'a> {

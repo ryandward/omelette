@@ -46,6 +46,16 @@ impl Items {
 }
 
 impl Ty {
+    /// The shape every value of this type has.
+    pub fn shape(self) -> Shape {
+        match self {
+            Self::Bool => Shape::BOOL,
+            Self::Str => Shape::STR,
+            Self::List(_) => Shape::LIST,
+            Self::Defined => Shape::DEFINED,
+            Self::Any => Shape::ALL,
+        }
+    }
     /// The static type of a value of `shape`.
     pub fn of(shape: Shape) -> Self {
         if shape == Shape::STR {

@@ -1,5 +1,6 @@
 //! Witness detection: which flows swallow a read that may be missing.
 use super::analysis::{Const, Graph, decided};
+use crate::affine::Form;
 use crate::core::{Core, Family, Kind, Mutator, Shape};
 use egg::{Id, Language, Symbol};
 use std::cell::RefCell;
@@ -376,12 +377,24 @@ impl Apart<'_> {
 
     /// Whether `z` differs from every value `body` takes, by their facts alone: a type the
     /// body never has, another constant, a value outside the integers or the bounds the body
-    /// keeps to, or the empty list where the body always builds one.
+    /// keeps to, or a list whose length always differs from the body's.
     fn direct(&self, z: Id, body: Id) -> bool {
         let g = self.g;
         let (zd, bd) = (&g[z].data, &g[body].data);
         if !zd.shape.meets(bd.shape) {
             return true;
+        }
+        if zd.shape.within(Shape::LIST)
+            && bd.shape.within(Shape::LIST)
+            && let Some(gap) = length(g, body, 16).plus(&length(g, z, 16), -1)
+        {
+            // Every unknown length is at least zero, so a gap whose parts share a sign and
+            // whose constant has it too is never zero.
+            let longer = gap.constant > 0 && gap.terms.values().all(|&c| c >= 0);
+            let shorter = gap.constant < 0 && gap.terms.values().all(|&c| c <= 0);
+            if longer || shorter {
+                return true;
+            }
         }
         let Some(c) = &zd.constant else { return false };
         let outside = match c {
@@ -389,9 +402,27 @@ impl Apart<'_> {
             // Only integers have bounds.
             _ => bd.lo.is_some() || bd.hi.is_some(),
         };
-        let built = *c == Const::Nil && g[body].nodes.iter().any(|n| matches!(n, Core::Cons(_)));
-        outside || built || bd.constant.as_ref().is_some_and(|d| d != c)
+        outside || bd.constant.as_ref().is_some_and(|d| d != c)
     }
+}
+
+/// A list's length as a sum: one for each cell it spells out, and the length of each list
+/// it does not, an unknown at least zero.
+fn length(g: &Graph, id: Id, depth: u8) -> Form {
+    let id = g.find(id);
+    let Some(depth) = depth.checked_sub(1) else { return Form::atom(id) };
+    for n in &g[id].nodes {
+        let form = match n {
+            Core::Nil => Some(Form::constant(0)),
+            Core::Cons([_, tail]) => length(g, *tail, depth).plus(&Form::constant(1), 1),
+            Core::Append([a, b]) => length(g, *a, depth).plus(&length(g, *b, depth), 1),
+            _ => None,
+        };
+        if let Some(form) = form {
+            return form;
+        }
+    }
+    Form::atom(id)
 }
 
 /// A replacement that is certainly a value, never undefined.

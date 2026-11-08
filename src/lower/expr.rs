@@ -322,16 +322,26 @@ impl<'a, 'l> Lowerer<'a, 'l> {
 }
 
 /// The type of a value that is one of two; None for an integer.
-fn join(a: &Val<'_>, b: &Val<'_>) -> Option<Ty> {
-    let ty = |v: &Val<'_>| match v {
+/// The static type two values share; `None` when both are integers.
+pub fn join(a: &Val<'_>, b: &Val<'_>) -> Option<Ty> {
+    combine(static_ty(a), static_ty(b))
+}
+
+/// A value's static type; `None` for an integer. A split has the type its two sides share.
+pub fn static_ty(v: &Val<'_>) -> Option<Ty> {
+    match v {
         Val::Num(_) => None,
         Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(Ty::Bool),
         Val::Str(_) | Val::Term(_, Ty::Str) => Some(Ty::Str),
         Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) => v.items().map(Ty::List),
-        Val::Undef | Val::Term(_, Ty::Any) | Val::Split(_) => Some(Ty::Any),
+        Val::Split(s) => combine(static_ty(&s.absent), static_ty(&s.present)),
+        Val::Undef | Val::Term(_, Ty::Any) => Some(Ty::Any),
         _ => Some(Ty::Defined),
-    };
-    match (ty(a), ty(b)) {
+    }
+}
+
+pub fn combine(x: Option<Ty>, y: Option<Ty>) -> Option<Ty> {
+    match (x, y) {
         (x, y) if x == y => x,
         (Some(Ty::List(x)), Some(Ty::List(y))) => Some(Ty::List(x.both(y))),
         (Some(Ty::Any), _) | (_, Some(Ty::Any)) => Some(Ty::Any),

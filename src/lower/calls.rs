@@ -2,9 +2,9 @@
 use super::Lowerer;
 use super::expr::Arm;
 use super::ops::Bin;
-use super::value::{Body, Fun, Items, Seq, Short, Ty, Val};
+use super::value::{Body, Fun, Items, RefKey, Seq, Short, Ty, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family, Kind};
+use crate::core::{Core, Family, Kind, Shape};
 use egg::Id;
 use oxc_ast::ast::{BindingPattern, CallExpression, Expression, Statement, VariableDeclarationKind};
 use std::rc::Rc;
@@ -208,7 +208,7 @@ impl<'a> Lowerer<'a, '_> {
     /// a function throws, and `flat` is modeled at depth one, or zero, which copies.
     fn precheck(&mut self, receiver: &Val<'a>, name: &str, args: &[Val<'a>]) -> Option<Val<'a>> {
         let first = args.first();
-        if matches!(name, "map" | "filter" | "find" | "every" | "some" | "reduce" | "flatMap") && first.is_none_or(not_callable) {
+        if matches!(name, "map" | "filter" | "find" | "every" | "some" | "reduce" | "flatMap" | "forEach") && first.is_none_or(not_callable) {
             return Some(Val::Throw);
         }
         if name != "flat" {
@@ -291,6 +291,10 @@ impl<'a> Lowerer<'a, '_> {
                 self.flat_items(&Rc::new(mapped))
             }
             "concat" => self.concat_list(Val::List(items.clone()), args),
+            "forEach" => {
+                let done = self.each(items, &f);
+                self.strict(done, &mut |_, _| Val::Undef)
+            }
             _ => {
                 let list = self.seq(items);
                 self.term_method(list, name, args)
@@ -447,6 +451,11 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| l.join_text(x))
             }
             "flat" => self.over_slot(s, Family::Container, &Val::empty(), &mut |l, x| l.spread(x)),
+            "forEach" => self.over_slot(s, Family::Propagate, &Val::Undef, &mut |l, x| {
+                let array = l.this_or(Val::Short(s.clone()));
+                let done = l.apply(f.clone(), vec![x, Val::int(0), array]);
+                l.strict(vec![done], &mut |_, _| Val::Undef)
+            }),
             "map" | "filter" | "flatMap" => self.short_walk(s, name, &f),
             _ => self.term_method(s.list, name, args),
         }
@@ -535,6 +544,7 @@ impl<'a> Lowerer<'a, '_> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "map" => self.walker(Walker::Map, &f, list).val(),
+            "forEach" => self.for_each(list, &f),
             "every" => Val::Term(self.walker(Walker::Every, &f, list).id, Ty::Bool),
             "some" => Val::Term(self.walker(Walker::Some, &f, list).id, Ty::Bool),
             "filter" => self.filter(list, &f),
@@ -615,6 +625,81 @@ impl<'a> Lowerer<'a, '_> {
             self.emit(&truth)
         };
         (self.b.add(Core::Lam(vec![x, i, body].into())), items)
+    }
+    /// `forEach` over a symbolic list: undefined, once the callback ran on every element.
+    /// When the callback's only effect updates one array this expression holds, that array's
+    /// contents are a fold over the list, with its contents before as the seed; any other
+    /// effect is unknown afterward, as for any callback that runs repeatedly. A callback that
+    /// may throw is not modeled.
+    fn for_each(&mut self, list: Seq, f: &Val<'a>) -> Val<'a> {
+        if !matches!(f, Val::Fun(_) | Val::Builtin(_)) {
+            self.emit(f);
+            self.clobber();
+            return Val::Undef;
+        }
+        let walk = Each { list, f: f.clone(), x: self.b.element(list.items), i: self.b.fresh(Kind::Index) };
+        self.coords.insert(walk.i, list.id);
+        self.members.insert(walk.x, list.id);
+        let base = self.state.clone();
+        let (written, opaque) = self.speculate(|l| {
+            l.run_on(&walk);
+            (l.written_since(&base), l.opaque)
+        });
+        let done = match written.as_slice() {
+            [key @ RefKey::Local(_)] if !opaque && base.cells.contains_key(key) => self.fold_store(*key, &walk),
+            _ => self.repeat(list.id, 1, |l| l.run_on(&walk)),
+        };
+        if self.may_raise(&done) {
+            return self.unsupported();
+        }
+        Val::Undef
+    }
+    /// The callback on the walk's element binder, its index, and the list.
+    fn run_on(&mut self, walk: &Each<'a>) -> Val<'a> {
+        let args = vec![Val::Term(walk.x, walk.list.items.ty()), Val::Num(Form::atom(walk.i)), self.this_or(walk.list.val())];
+        self.walking.push(walk.list.id);
+        let done = self.apply(walk.f.clone(), args);
+        self.walking.pop();
+        done
+    }
+    /// An array whose contents every run of the callback updates: they fold over the list.
+    /// Their type is found as an accumulator's is.
+    fn fold_store(&mut self, key: RefKey, walk: &Each<'a>) -> Val<'a> {
+        let before = self.deref(Val::Ref(key));
+        let mut items = match self.static_type(before.clone()) {
+            Some(Ty::List(items)) => Some(items),
+            _ => None,
+        };
+        for _ in 0..3 {
+            let Some(now) = items else { break };
+            let acc = self.b.fresh_shaped(Kind::Acc, Shape::LIST);
+            let next = self.speculate(|l| {
+                l.write(key, Val::Term(acc, Ty::List(now)));
+                l.run_on(walk);
+                let contents = l.deref(Val::Ref(key));
+                l.static_type(contents)
+            });
+            items = match super::expr::combine(Some(Ty::List(now)), next) {
+                Some(Ty::List(next)) if next == now => return self.fold_into(key, &before, now, walk),
+                Some(Ty::List(next)) => Some(next),
+                _ => None,
+            };
+        }
+        self.repeat(walk.list.id, 1, |l| l.run_on(walk))
+    }
+    fn fold_into(&mut self, key: RefKey, before: &Val<'a>, items: Items, walk: &Each<'a>) -> Val<'a> {
+        let seed = self.emit(before);
+        let acc = self.b.fresh_shaped(Kind::Acc, Shape::LIST);
+        self.repeat_keeping(walk.list.id, 1, Some(key), |l| {
+            l.write(key, Val::Term(acc, Ty::List(items)));
+            let done = l.run_on(walk);
+            let after = l.deref(Val::Ref(key));
+            let body = l.emit(&after);
+            let lam = l.b.add(Core::Lam(vec![acc, walk.x, walk.i, body].into()));
+            let folded = Val::Term(l.b.add(Core::Fold([lam, seed, walk.list.id])), Ty::List(items));
+            l.write(key, folded);
+            done
+        })
     }
     /// A possibly missing read at another collection's coordinate, left as a hole in a
     /// collection shaped like the walked one.
@@ -704,7 +789,7 @@ impl<'a> Lowerer<'a, '_> {
         // Without an initial value, a one-element list returns its element uncalled, so the
         // law also needs the callback to return its element. A callback with effects runs on
         // every element, not only the last.
-        let before = self.state.clone();
+        let (before, opaque) = (self.state.clone(), self.opaque);
         let mut returns_element = true;
         let body = self.worlds(slot.clone(), Family::Unit, &mut |l, x| match x {
             Val::Undef => unit.clone(),
@@ -717,7 +802,8 @@ impl<'a> Lowerer<'a, '_> {
         });
         let id = self.emit(&body);
         if self.b.mentions(id, acc) || (init.is_none() && !returns_element) || !self.state.same(&before) {
-            self.state = before;
+            // The attempt is discarded, and so is what it found it could not model.
+            (self.state, self.opaque) = (before, opaque);
             return self.fold(list, &f, init);
         }
         body
@@ -728,10 +814,12 @@ impl<'a> Lowerer<'a, '_> {
         if let Some(seed @ Val::Split(_)) = init {
             return self.lift(seed, Family::Undecided, &mut |l, z| l.fold(list, f, Some(z)));
         }
-        let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.element(list.items), self.b.fresh(Kind::Index));
+        let (x, i) = (self.b.element(list.items), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         self.members.insert(x, list.id);
-        let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
+        let ty = self.accumulator(&Each { list, f: f.clone(), x, i }, init.as_ref());
+        let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
+        let args = vec![Val::Term(acc, ty), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         self.walking.push(list.id);
         // Without a seed, the callback first runs on the second element.
         let least = if init.is_some() { 1 } else { 2 };
@@ -743,7 +831,65 @@ impl<'a> Lowerer<'a, '_> {
             Some(z) => self.emit(&z),
             None => self.b.add(Core::Throw),
         };
-        Val::Term(self.b.add(Core::Fold([lam, init, list.id])), Ty::Any)
+        Val::Term(self.b.add(Core::Fold([lam, init, list.id])), ty)
+    }
+    /// A value's static type, reading what an array with identity holds; `None` for an
+    /// integer.
+    fn static_type(&mut self, v: Val<'a>) -> Option<Ty> {
+        match v {
+            Val::Ref(_) => {
+                let contents = self.deref(v);
+                self.static_type(contents)
+            }
+            Val::Split(s) => {
+                let (absent, present) = (self.static_type(s.absent.clone()), self.static_type(s.present.clone()));
+                super::expr::combine(absent, present)
+            }
+            v => super::expr::static_ty(&v),
+        }
+    }
+    /// The accumulator's type: one the seed (or, without one, the first element) has, and
+    /// every result of the callback keeps. The callback runs on an accumulator of the type
+    /// so far until its result fits, which a few rounds settle; numbers, which a fold may
+    /// carry past the integers, stay untyped. A list term is a value, not an array with an
+    /// identity, so only a callback without effects, which cannot mutate or keep the
+    /// accumulator, gets a typed one.
+    fn accumulator(&mut self, walk: &Each<'a>, init: Option<&Val<'a>>) -> Ty {
+        let (list, f, x, i) = (walk.list, &walk.f, walk.x, walk.i);
+        let seed = init.cloned().unwrap_or(Val::Term(x, list.items.ty()));
+        let Some(mut ty) = self.static_type(seed) else { return Ty::Any };
+        // The probe's accumulator is an array with identity, so mutating or keeping it is an
+        // effect; the store is as it was afterward.
+        let saved = self.state.clone();
+        let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
+        let acc = self.own(Val::Term(acc, ty));
+        let args = vec![acc, Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
+        let ((), pure) = self.probe(|l| {
+            l.walking.push(list.id);
+            l.apply(f.clone(), args);
+            l.walking.pop();
+        });
+        self.state = saved;
+        if !pure {
+            return Ty::Any;
+        }
+        for _ in 0..3 {
+            let acc = self.b.fresh_shaped(Kind::Acc, ty.shape());
+            let args = vec![Val::Term(acc, ty), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
+            // An array the callback returns is typed by what it holds.
+            let result = self.speculate(|l| {
+                l.walking.push(list.id);
+                let result = l.apply(f.clone(), args);
+                l.walking.pop();
+                l.static_type(result)
+            });
+            match super::expr::combine(Some(ty), result) {
+                Some(next) if next == ty => return ty,
+                Some(next) => ty = next,
+                None => return Ty::Any,
+            }
+        }
+        Ty::Any
     }
     /// `list.slice(start, end)`, whose bounds count from the end when negative. Bounds that
     /// differ by `d >= 0` keep at most `d` elements whatever their signs, so a difference of
@@ -905,4 +1051,13 @@ fn slice_items<'a>(items: &Rc<Vec<Val<'a>>>, start: Option<&Val<'a>>, end: Optio
 
 fn index<'a>(k: usize) -> Val<'a> {
     Val::int(i64::try_from(k).unwrap_or(i64::MAX))
+}
+
+/// A walk over a symbolic list: the list, its callback, and the element and index binders
+/// every run of the callback receives.
+struct Each<'a> {
+    list: Seq,
+    f: Val<'a>,
+    x: Id,
+    i: Id,
 }

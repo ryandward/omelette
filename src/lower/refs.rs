@@ -371,6 +371,11 @@ impl<'a> Lowerer<'a, '_> {
     /// `least` elements: what it wrote to arrays that outlive it is unknown afterward, and
     /// what it logged or let escape happens only where the list is that long.
     pub fn repeat(&mut self, list: Id, least: i64, body: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {
+        self.repeat_keeping(list, least, None, body)
+    }
+    /// [`Self::repeat`], except that `kept`, whose contents `body` leaves as what every run
+    /// together makes them, keeps them.
+    pub fn repeat_keeping(&mut self, list: Id, least: i64, kept: Option<RefKey>, body: impl FnOnce(&mut Self) -> Val<'a>) -> Val<'a> {
         let base = self.state.clone();
         let out = body(self);
         if self.state.same(&base) {
@@ -378,10 +383,19 @@ impl<'a> Lowerer<'a, '_> {
         }
         let after = std::mem::replace(&mut self.state, base.clone());
         let outlive = |k: &RefKey| base.cells.contains_key(k) || matches!(k, RefKey::Input(_));
-        let written: Vec<RefKey> =
-            after.cells.iter().filter(|(k, v)| outlive(k) && base.cells.get(k).is_none_or(|old| !old.identical(v))).map(|(k, _)| *k).collect();
+        let written: Vec<RefKey> = after
+            .cells
+            .iter()
+            .filter(|(k, v)| outlive(k) && Some(**k) != kept && base.cells.get(k).is_none_or(|old| !old.identical(v)))
+            .map(|(k, _)| *k)
+            .collect();
         self.state.cells = after.cells.clone();
         self.state.epoch = after.epoch;
+        // What the callback stored may hold a read that may be missing, and an unknown list
+        // would hide it: where it does, the expression's value is unknown.
+        if written.iter().any(|k| after.cells.get(k).is_some_and(|v| self.reads(v, &after))) {
+            self.opaque = true;
+        }
         for key in written {
             let unknown = self.unknown_list();
             self.write(key, unknown);
@@ -429,6 +443,44 @@ impl<'a> Lowerer<'a, '_> {
         self.state.epoch += 1;
     }
     /// Contents lowering no longer knows.
+    /// The arrays that outlive a callback and that it wrote, from the store before it.
+    pub fn written_since(&self, base: &State<'a>) -> Vec<RefKey> {
+        let outlive = |k: &RefKey| base.cells.contains_key(k) || matches!(k, RefKey::Input(_));
+        let mut keys: Vec<RefKey> = self
+            .state
+            .cells
+            .iter()
+            .filter(|(k, v)| outlive(k) && base.cells.get(k).is_none_or(|old| !old.identical(v)))
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_by_key(|k| format!("{k:?}"));
+        keys
+    }
+    /// Whether a value depends on a read that may be missing, through arrays it holds too.
+    fn reads(&self, v: &Val<'a>, state: &State<'a>) -> bool {
+        let mut open = Vec::new();
+        self.reads_in(v, state, &mut open)
+    }
+    fn reads_in(&self, v: &Val<'a>, state: &State<'a>, open: &mut Vec<RefKey>) -> bool {
+        match v {
+            Val::Split(_) | Val::Short(_) => true,
+            Val::List(items) => items.iter().any(|v| self.reads_in(v, state, open)),
+            Val::Term(id, _) => self.b.reads(*id),
+            Val::Ref(k) if !open.contains(k) => {
+                open.push(*k);
+                let held = match k {
+                    RefKey::Choice(n) => {
+                        let (_, yes, no) = &self.choices[*n];
+                        self.reads_in(yes, state, open) || self.reads_in(no, state, open)
+                    }
+                    k => state.cells.get(k).is_some_and(|c| self.reads_in(c, state, open)),
+                };
+                open.pop();
+                held
+            }
+            _ => false,
+        }
+    }
     pub fn unknown_list(&mut self) -> Val<'a> {
         self.next_ref += 1;
         let tag = Val::int(i64::from(self.next_ref));
