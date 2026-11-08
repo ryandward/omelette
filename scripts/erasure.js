@@ -1,7 +1,8 @@
 // Erasure oracle: checks omelette's verdicts against the definition of a cheat.
 // Usage: node scripts/erasure.js FILE   (one expression per line, # comments; OMELETTE=binary)
 //
-// Each expression must mention `xs` only as `xs[i]`, so its value is c(xs[i]) for some c.
+// Each expression must mention `xs` only as `xs[i]`, `xs.at(i)`, or `xs.slice(i, i + 1)`, so
+// its value is c(xs[i]) for some c.
 // It is a cheat iff the missing read's result c(undefined) is also the result of some present
 // element. It may also mention `c` and `j`, a context fixed while the read varies: a cheat in
 // any context is a cheat. The oracle evaluates c on a missing read and on a pool of present
@@ -55,8 +56,8 @@ let unsound = 0;
 let notes = 0;
 const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('#'));
 for (const e of lines) {
-  if (/\bxs\b(?!\[i\])/.test(e)) {
-    console.log(`${e}\n    skipped: mentions xs other than as xs[i]`);
+  if (/\bxs\b/.test(e.replace(/\bxs(\[i\]|\.at\(i\)|\.slice\(i, i \+ 1\))/g, ''))) {
+    console.log(`${e}\n    skipped: mentions xs other than at i`);
     continue;
   }
   const f = new Function('xs', 'i', 'c', 'j', `return (${e});`);

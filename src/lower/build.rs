@@ -95,6 +95,8 @@ impl Builder {
             Val::List(items) => self.list(items),
             Val::Short(short) => short.list.id,
             Val::Fun(_) => self.unsupported(),
+            // The global itself: a function the graph knows only by name.
+            Val::Builtin(b) => self.var(Kind::Fun, b.name()),
             Val::Term(id, _) => *id,
             Val::Split(s) => self.split(s),
             Val::Ref(_) => unreachable!("lowering resolves references before emitting"),

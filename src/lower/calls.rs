@@ -18,6 +18,9 @@ impl<'a> Lowerer<'a, '_> {
             let Some(e) = a.as_expression() else { return self.unsupported() };
             args.push(self.expr(e));
         }
+        if let Some(b) = self.builtin_member(&c.callee) {
+            return self.apply(Val::Builtin(b), args);
+        }
         if let Expression::StaticMemberExpression(m) = &c.callee {
             if m.optional {
                 return self.unsupported();
@@ -55,6 +58,7 @@ impl<'a> Lowerer<'a, '_> {
         }
         match callee {
             Val::Fun(f) if self.depth < INLINE_DEPTH => self.inline(&f, args),
+            Val::Builtin(b) => self.builtin(b, &args),
             Val::Split(_) => self.lift(callee, Family::Propagate, &mut |l, f| l.invoke(f, args.clone())),
             callee => {
                 let mut children = vec![self.emit(&callee)];
@@ -367,7 +371,7 @@ impl<'a> Lowerer<'a, '_> {
 
 impl<'a, 'l> Lowerer<'a, 'l> {
     /// Methods over a list of at most one element: the unit where the slot is absent.
-    fn short_method(&mut self, s: &Rc<Short<'a>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
+    pub fn short_method(&mut self, s: &Rc<Short<'a>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
         match name {
             "every" | "some" => {
@@ -511,7 +515,7 @@ impl<'a> Lowerer<'a, '_> {
     pub fn walker(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> Seq {
         let (state, this) = (self.state.clone(), self.this_or(list.val()));
         let (lam, items) = match f {
-            Val::Fun(_) => self.callback(kind, f, list),
+            Val::Fun(_) | Val::Builtin(_) => self.callback(kind, f, list),
             other => {
                 let lam = self.emit(other);
                 self.clobber();
@@ -524,7 +528,7 @@ impl<'a> Lowerer<'a, '_> {
             Walker::Every => Core::Every([lam, list.id]),
             Walker::Some => Core::Some([lam, list.id]),
         });
-        if kind == Walker::Map && matches!(f, Val::Fun(_)) {
+        if kind == Walker::Map && matches!(f, Val::Fun(_) | Val::Builtin(_)) {
             // Arrays the callback built do not count; arrays that outlive it do.
             let writes = self.state.cells.iter().any(|(k, v)| match state.cells.get(k) {
                 Some(old) => !old.identical(v),

@@ -74,6 +74,24 @@ impl<'a, 'l> Lowerer<'a, 'l> {
     pub fn lift(&mut self, v: Val<'a>, family: Family, op: &mut Op1<'a, 'l, '_>) -> Val<'a> {
         self.lift2(v, Val::Undef, family, &mut |l, v, _| op(l, v))
     }
+    /// Apply `op` to a literal list in each world of the reads its elements depend on, so
+    /// an operation that is not element by element never sees a possibly missing read.
+    pub fn settled(&mut self, items: &Rc<Vec<Val<'a>>>, family: Family, op: &mut Op1<'a, 'l, '_>) -> Val<'a> {
+        let Some((k, s)) = items.iter().enumerate().find_map(|(k, v)| if let Val::Split(s) = v { Some((k, s.clone())) } else { None }) else {
+            return op(self, Val::List(items.clone()));
+        };
+        let (absent, present) = self.fork(
+            &mut |l, present| {
+                let (world, side) = if present { (Val::Term(s.elem, s.items.ty()), s.present.clone()) } else { (Val::Undef, s.absent.clone()) };
+                l.within(s.read, world, |l| {
+                    let copy = items.iter().enumerate().map(|(j, v)| if j == k { side.clone() } else { l.assume(v.clone(), s.read, present) }).collect();
+                    l.settled(&Rc::new(copy), family, op)
+                })
+            },
+            &super::refs::Join::Read(s.clone()),
+        );
+        self.resplit(&s, absent, present, family)
+    }
     /// Continue with `vals` once they are evaluated: `then` runs on them as they are, and
     /// every world in which one of them throws then throws.
     pub fn strict(&mut self, vals: Vec<Val<'a>>, then: &mut Then<'a, 'l, '_>) -> Val<'a> {
@@ -169,6 +187,9 @@ impl<'a> Lowerer<'a, '_> {
         self.arith(Bin::Add, &a, &b)
     }
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
+        // Arithmetic reads a known string or list as the number it spells.
+        let mut known = |v: &Val<'a>| if matches!(v, Val::Str(_)) || v.items().is_some() { self.to_number(v.clone()) } else { v.clone() };
+        let (a, b) = (&known(a), &known(b));
         let (Some(lhs), Some(rhs)) = (numeric(a), numeric(b)) else {
             // `undefined` and `NaN` make arithmetic NaN, but `+` concatenates when the other
             // operand may be a string.
@@ -198,6 +219,20 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// `a < b` (strict) or `a <= b`.
     fn order(&mut self, strict: bool, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
+        // A list compares as its text; a known string against a number, as its number.
+        let (a, b) = (self.deref(a.clone()), self.deref(b.clone()));
+        if a.items().is_some() || b.items().is_some() {
+            let text = |l: &mut Self, v: Val<'a>| if v.items().is_some() { l.to_text(v) } else { v };
+            let (a, b) = (text(self, a), text(self, b));
+            return self.lift2(a, b, Family::Sink, &mut |l, a, b| l.order(strict, &a, &b));
+        }
+        let number = |v: &Val<'_>| matches!(v, Val::Num(_) | Val::NaN | Val::Bool(_) | Val::Undef);
+        if (matches!(a, Val::Str(_)) && number(&b)) || (matches!(b, Val::Str(_)) && number(&a)) {
+            let numeric = |l: &mut Self, v: Val<'a>| if matches!(v, Val::Str(_)) { l.to_number(v) } else { v };
+            let (a, b) = (numeric(self, a), numeric(self, b));
+            return self.order(strict, &a, &b);
+        }
+        let (a, b) = (&a, &b);
         let gap = numeric(a).zip(numeric(b)).and_then(|(x, y)| y.plus(&x, -1)?.plus(&Form::constant(i64::from(strict)), -1));
         if let Some(d) = gap.filter(exact) {
             return self.b.nonnegative(&d);
@@ -260,7 +295,7 @@ impl<'a> Lowerer<'a, '_> {
                 None => self.nonzero(&f),
             },
             Val::Str(s) => Val::Bool(!s.units().is_empty()),
-            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Val::Bool(true),
+            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Builtin(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Val::Bool(true),
             Val::Term(_, Ty::Str) => {
                 let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
@@ -293,6 +328,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Num(ref f) if f.known().is_some() => text(&f.constant.to_string()),
             // A list's text is its elements joined by commas.
             Val::List(ref items) => self.join_items(items, None),
+            Val::Short(ref s) => self.short_method(s, "join", &[]),
             _ => self.dynamic("string", &[&v], Ty::Str),
         }
     }

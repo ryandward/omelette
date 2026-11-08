@@ -88,3 +88,15 @@ CHEAT	names[i] === undefined ? [] : names[i].length
 UNDECIDED	names[i] === undefined ? undefined : names[i].length
 no cheat	c ? (names[i] === undefined ? 'x' : [names[i]]) : (names[i] === undefined ? 0 : [names[i]])
 CHEAT	names.length ? names[names.length - 1] : 0
+CHEAT	Number(widths[i])
+CHEAT	+widths[i]
+CHEAT	parseInt(names[i])
+CHEAT	String(names[i])
+CHEAT	Boolean(names[i])
+UNDECIDED	JSON.stringify(names[i])
+CHEAT	JSON.stringify([names[i]])
+no cheat	names.map(Number)
+no cheat	names.filter(Boolean)
+CHEAT	String(names.slice(i, i + 1))
+CHEAT	[names[i]].sort().join()
+CHEAT	[names[i]] < 1

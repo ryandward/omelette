@@ -65,7 +65,7 @@ Checked in this order:
 | `default` | a value the program wrote | `xs[i] ?? 0`, `xs[i] === undefined ? 0 : xs[i]`, `xs.length ? xs[xs.length - 1] : 0`, `[...a, 0][0]` |
 | `unit` | the unit of a fold's monoid | `xs.slice(i, i + 1).every((x) => x > 0)` (`true`), `.some((x) => x > 0)` (`false`), `.join('')` (`''`), `.filter((x) => x > 0).length` (`0`), `xs.slice(i, j).reduce((_, x) => x, 0)` |
 | `container` | an empty collection | `groups.slice(i, i + 1).flat()`, `.flatMap((g) => g)` |
-| `sink` | what an operator makes of `undefined` | `names[i] === 'on'`, `names[i] !== 'off'`, `widths[i] < 3`, `widths[i] + 1`, `names[i] + '!'`, `` `${names[i]}` ``, `!names[i]` |
+| `sink` | what an operator or a conversion makes of `undefined` | `names[i] === 'on'`, `names[i] !== 'off'`, `widths[i] < 3`, `widths[i] + 1`, `names[i] + '!'`, `` `${names[i]}` ``, `!names[i]`, `Number(widths[i])`, `+widths[i]`, `parseInt(names[i])`, `String(names[i])`, `Boolean(names[i])`, `JSON.stringify([names[i]])` |
 | `drift` | a hole in a collection shaped like another | `users.map((_, i) => roles[i])`, `names.map((n, i) => names[i + 1])` |
 
 These are not cheats:
@@ -76,7 +76,9 @@ These are not cheats:
 - its replacement is a value the present branch never produces: `` names[i] === undefined ? -1 : `${names[i]}`.length ``, `names[i] === undefined ? 'none' : names[i] > 0`;
 - it throws when missing: `names[i].length`;
 - the index is proven in range: `names.map((n, i) => names[i])`, `xs.map((x) => xs[0] ?? 0)`;
-- the operation speaks for a whole list: `names.every((n) => n !== 'off')`, `names.join(', ')`.
+- the operation speaks for a whole list: `names.every((n) => n !== 'off')`, `names.join(', ')`, `names.map(Number)`, `names.filter(Boolean)`.
+
+`JSON.stringify(names[i])` passes the missing read on as `undefined`, but a present function writes `undefined` too, so it is undecided until the elements' types rule functions out.
 
 ### The image test
 

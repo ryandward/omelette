@@ -81,11 +81,24 @@ pub enum Val<'a> {
     /// A symbolic list holding at most one element.
     Short(Rc<Short<'a>>),
     Fun(Rc<Fun<'a>>),
+    /// A global function lowering models.
+    Builtin(Builtin),
     Term(Id, Ty),
     Split(Rc<Split<'a>>),
     /// An array with identity: one the caller holds, or one this expression allocated and
     /// bound. Its contents live in the lowerer's store, so every alias sees a mutation.
     Ref(RefKey),
+}
+
+/// The global functions lowering models, each one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Builtin {
+    Number,
+    String,
+    Boolean,
+    ParseInt,
+    ParseFloat,
+    Stringify,
 }
 
 /// The identity of an array a mutation can reach.
@@ -179,6 +192,7 @@ impl Val<'_> {
             (Self::List(a), Self::List(b)) => Rc::ptr_eq(a, b),
             (Self::Short(a), Self::Short(b)) => Rc::ptr_eq(a, b),
             (Self::Fun(a), Self::Fun(b)) => Rc::ptr_eq(a, b),
+            (Self::Builtin(a), Self::Builtin(b)) => a == b,
             (Self::Split(a), Self::Split(b)) => Rc::ptr_eq(a, b),
             (Self::Term(a, _), Self::Term(b, _)) => a == b,
             (Self::Ref(a), Self::Ref(b)) => a == b,
@@ -207,9 +221,16 @@ impl Val<'_> {
     pub fn defined(&self) -> bool {
         match self {
             Self::Undef | Self::Throw | Self::Split(_) | Self::Term(_, Ty::Any) => false,
-            Self::NaN | Self::Bool(_) | Self::Num(_) | Self::Str(_) | Self::List(_) | Self::Short(_) | Self::Fun(_) | Self::Term(..) | Self::Ref(_) => {
-                true
-            }
+            Self::NaN
+            | Self::Bool(_)
+            | Self::Num(_)
+            | Self::Str(_)
+            | Self::List(_)
+            | Self::Short(_)
+            | Self::Fun(_)
+            | Self::Builtin(_)
+            | Self::Term(..)
+            | Self::Ref(_) => true,
         }
     }
     /// Whether this is a known value lowering can compute with.

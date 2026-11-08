@@ -13,6 +13,10 @@ use std::collections::HashMap;
 pub fn classify(semantic: &Semantic<'_>, kinds: &mut HashMap<String, Kind>) {
     let scoping = semantic.scoping();
     for (name, references) in scoping.root_unresolved_references() {
+        // A global lowering models is not an input.
+        if super::value::Builtin::is_global(name.as_str()) {
+            continue;
+        }
         for &reference in references {
             let node = scoping.get_reference(reference).node_id();
             if let Some(kind) = role(semantic, node) {

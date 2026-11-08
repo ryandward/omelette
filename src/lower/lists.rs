@@ -195,7 +195,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Short(s) => self.short_length(&s),
             Val::Term(id, Ty::List(_) | Ty::Str) => Val::Num(Form::atom(self.b.add(Core::Len(id)))),
             Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Term(_, Ty::Bool) => Val::Undef,
-            Val::Fun(_) => self.unsupported(),
+            Val::Fun(_) | Val::Builtin(_) => self.unsupported(),
             // A number's or a boolean's length is undefined; anything else's may be anything.
             v => self.dynamic("length", &[&v], Ty::Any),
         }
@@ -245,7 +245,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             Val::Str(s) => Val::List(Rc::new(code_points(&s.units()).into_iter().map(Val::Str).collect())),
             Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::Defined)),
-            Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Term(_, Ty::Bool) => Val::Throw,
+            Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Builtin(_) | Val::Term(_, Ty::Bool) => Val::Throw,
             Val::Term(_, Ty::Defined | Ty::Any) | Val::Split(_) => {
                 let spread = self.dynamic("iterate", &[&v], Ty::List(Items::Any));
                 self.clobber();

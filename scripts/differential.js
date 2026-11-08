@@ -34,9 +34,11 @@ function decode(x) {
     ? { true: true, false: false, undefined: undefined, nan: NaN, nil: [] }[x]
     : NOT;
 }
-// omelette's values are finite, so a cyclic Node array is never equal to one.
+// omelette's values are finite, so a cyclic Node array is never equal to one. Numbers compare
+// by SameValueZero: the model identifies -0 with 0, since no operation it models tells them
+// apart (there is no division or Object.is, and String and === treat them alike).
 const same = (a, b, open = new Set()) => {
-  if (!Array.isArray(a) || !Array.isArray(b)) return Object.is(a, b);
+  if (!Array.isArray(a) || !Array.isArray(b)) return a === b || (Number.isNaN(a) && Number.isNaN(b));
   if (open.has(b)) return false;
   open.add(b);
   const equal = a.length === b.length && a.every((x, i) => same(x, b[i], open));

@@ -1,6 +1,7 @@
 //! Lowering: a partial evaluator that owns JavaScript's operational semantics and emits core
 //! terms for egg. See docs/architecture.md.
 mod build;
+mod builtins;
 mod calls;
 mod expr;
 mod lists;

@@ -39,6 +39,9 @@ impl<'a> Lowerer<'a, '_> {
             Expression::ConditionalExpression(c) => self.conditional(c),
             Expression::ArrayExpression(a) => self.array(a),
             Expression::StaticMemberExpression(m) if !m.optional => {
+                if let Some(b) = self.builtin_member(e) {
+                    return Val::Builtin(b);
+                }
                 let object = self.expr(&m.object);
                 self.property(object, m.property.name.as_str())
             }
@@ -87,7 +90,20 @@ impl<'a> Lowerer<'a, '_> {
             None => self.free(id.name.as_str()),
         }
     }
+    /// `JSON.stringify` and the like: a builtin named by a member of a free global.
+    pub fn builtin_member(&self, e: &Expression<'_>) -> Option<super::value::Builtin> {
+        let Expression::StaticMemberExpression(m) = e.without_parentheses() else { return None };
+        let Expression::Identifier(object) = m.object.without_parentheses() else { return None };
+        let free = self.scoping.get_reference(object.reference_id()).symbol_id().is_none();
+        if m.optional || !free {
+            return None;
+        }
+        super::value::Builtin::member(object.name.as_str(), m.property.name.as_str())
+    }
     fn free(&mut self, name: &str) -> Val<'a> {
+        if let Some(b) = super::value::Builtin::global(name) {
+            return Val::Builtin(b);
+        }
         match name {
             "undefined" => return Val::Undef,
             "NaN" => return Val::NaN,
@@ -115,6 +131,7 @@ impl<'a> Lowerer<'a, '_> {
         match u.operator {
             UnaryOperator::LogicalNot => self.not(v),
             UnaryOperator::UnaryNegation => self.binary(Bin::Sub, Val::int(0), v),
+            UnaryOperator::UnaryPlus => self.builtin(super::value::Builtin::Number, &[v]),
             _ => self.unsupported(),
         }
     }
@@ -316,7 +333,7 @@ fn join(a: &Val<'_>, b: &Val<'_>) -> Option<Ty> {
     }
 }
 
-fn integer(value: f64) -> Option<i64> {
+pub fn integer(value: f64) -> Option<i64> {
     let whole = value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0;
     #[allow(clippy::cast_possible_truncation)]
     whole.then_some(value as i64)

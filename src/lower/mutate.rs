@@ -49,7 +49,7 @@ impl<'a> Lowerer<'a, '_> {
                 parts.extend(args);
                 self.dynamic(m.name(), &parts, Ty::Any)
             }
-            Val::Fun(_) => self.unsupported(),
+            Val::Fun(_) | Val::Builtin(_) => self.unsupported(),
             _ => Val::Throw,
         }
     }
@@ -135,6 +135,16 @@ impl<'a> Lowerer<'a, '_> {
         }
         if let Val::Split(_) = c {
             return (Val::Undef, self.lift(c, Family::Propagate, &mut |l, c| l.sorted(c, cmp).1));
+        }
+        // A list of at most one element is already in order, and the comparator never runs.
+        if matches!(&c, Val::List(items) if items.len() < 2) {
+            return (Val::Undef, c);
+        }
+        if let Val::List(ref items) = c
+            && items.iter().any(|v| matches!(v, Val::Split(_)))
+        {
+            let items = items.clone();
+            return (Val::Undef, self.settled(&items, Family::Propagate, &mut |l, c| l.sorted(c, cmp).1));
         }
         let list = match c {
             Val::List(ref items) if matches!(cmp, Val::Undef) => match default_order(items) {
