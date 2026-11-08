@@ -284,7 +284,17 @@ impl<'a> Lowerer<'a, '_> {
             "at" => self.at_items(items, &f),
             "every" | "some" => self.quantify(items, &f, name == "every", 0),
             "reduce" => self.fold_items(items, &f, args.get(1).cloned()),
-            "join" => self.join_items(items, args.first().cloned()),
+            "join" => {
+                // The receiver is being written too, so an element that is the receiver is empty.
+                let receiver = match self.this {
+                    Some(Val::Ref(key)) => Some(key),
+                    _ => None,
+                };
+                self.joining.extend(receiver);
+                let text = self.join_items(items, args.first().cloned());
+                self.joining.truncate(self.joining.len() - usize::from(receiver.is_some()));
+                text
+            }
             "flat" => self.flat_items(items),
             "flatMap" => {
                 let mapped = self.each(items, &f);

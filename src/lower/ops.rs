@@ -179,12 +179,14 @@ impl<'a> Lowerer<'a, '_> {
     /// `a + b`: concatenation when an operand is a string or a list, and otherwise numeric
     /// addition with booleans coerced.
     fn add(&mut self, a: Val<'a>, b: Val<'a>) -> Val<'a> {
-        let (a, b) = (self.deref(a), self.deref(b));
-        if is_text(&a) || is_text(&b) || a.items().is_some() || b.items().is_some() {
+        // The contents decide the operation; an array keeps its identity into its text, so a
+        // cycle in it is written once.
+        let (x, y) = (self.deref(a.clone()), self.deref(b.clone()));
+        if is_text(&x) || is_text(&y) || x.items().is_some() || y.items().is_some() {
             let (a, b) = (self.to_text(a), self.to_text(b));
             return self.concat(&a, &b);
         }
-        self.arith(Bin::Add, &a, &b)
+        self.arith(Bin::Add, &x, &y)
     }
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         // Arithmetic reads a known string or list as the number it spells.
@@ -226,12 +228,13 @@ impl<'a> Lowerer<'a, '_> {
     /// `a < b` (strict) or `a <= b`.
     fn order(&mut self, strict: bool, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         // A list compares as its text; a known string against a number, as its number.
-        let (a, b) = (self.deref(a.clone()), self.deref(b.clone()));
-        if a.items().is_some() || b.items().is_some() {
-            let text = |l: &mut Self, v: Val<'a>| if v.items().is_some() { l.to_text(v) } else { v };
-            let (a, b) = (text(self, a), text(self, b));
+        let (x, y) = (self.deref(a.clone()), self.deref(b.clone()));
+        if x.items().is_some() || y.items().is_some() {
+            let text = |l: &mut Self, v: &Val<'a>, contents: Val<'a>| if contents.items().is_some() { l.to_text(v.clone()) } else { contents };
+            let (a, b) = (text(self, a, x), text(self, b, y));
             return self.lift2(a, b, Family::Sink, &mut |l, a, b| l.order(strict, &a, &b));
         }
+        let (a, b) = (x, y);
         let number = |v: &Val<'_>| matches!(v, Val::Num(_) | Val::NaN | Val::Bool(_) | Val::Undef);
         if (matches!(a, Val::Str(_)) && number(&b)) || (matches!(b, Val::Str(_)) && number(&a)) {
             let numeric = |l: &mut Self, v: Val<'a>| if matches!(v, Val::Str(_)) { l.to_number(v) } else { v };
@@ -343,6 +346,18 @@ impl<'a> Lowerer<'a, '_> {
     }
     pub fn to_text(&mut self, v: Val<'a>) -> Val<'a> {
         let text = |s: &str| Val::Str(Utf16::new(s.encode_utf16()));
+        // An array being written already writes as empty text where it holds itself, as
+        // engines join a cyclic array.
+        if let Val::Ref(key) = v {
+            if self.joining.contains(&key) {
+                return text("");
+            }
+            self.joining.push(key);
+            let contents = self.deref(v);
+            let out = self.to_text(contents);
+            self.joining.pop();
+            return out;
+        }
         let v = self.deref(v);
         match v {
             Val::Str(_) | Val::Term(_, Ty::Str) | Val::Throw => v,

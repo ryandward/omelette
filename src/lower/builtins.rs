@@ -80,6 +80,11 @@ impl<'a> Lowerer<'a, '_> {
     /// are values here, so a fraction or an infinity is a number lowering does not know.
     pub fn to_number(&mut self, v: Val<'a>) -> Val<'a> {
         self.consume(&v);
+        // An array keeps its identity into its text, so a cycle in it is written once.
+        if matches!(v, Val::Ref(_)) && self.deref(v.clone()).items().is_some() {
+            let text = self.to_text(v);
+            return self.lift(text, Family::Sink, &mut |l, text| l.to_number(text));
+        }
         let v = self.deref(v);
         match v {
             Val::Throw | Val::NaN | Val::Num(_) => v,

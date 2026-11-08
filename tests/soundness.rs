@@ -390,3 +390,18 @@ fn many_throwing_elements_lower_in_linear_time() {
     let r = omelette::engine::evaluate(&format!("[{}, 0]", items.join(", "))).unwrap();
     assert!(r.parse_time.as_millis() < 50, "{:?}", r.parse_time);
 }
+
+#[test]
+fn an_array_that_holds_itself_writes_as_empty_text_inside_itself() {
+    // Engines write an array already being joined as empty text, rather than recursing.
+    value("(() => { const a = [1]; a.push(a); return a.join(); })()", "utf16:0031002c");
+    value("(() => { const a = [1]; a.push(a); return `${a}`; })()", "utf16:0031002c");
+    value("(() => { const a = [1]; const b = [a, a]; return b.join(); })()", "utf16:0031002c0031");
+}
+
+#[test]
+fn a_repeated_callback_that_stores_a_missing_read_leaves_the_value_unknown() {
+    // The array it writes becomes unknown, which would hide the read's fallback.
+    checked("(() => { const out = []; xs.map((_, k) => out.push(ys[k] ?? 0)); return out; })()", Verdict::Undecided);
+    checked("(() => { const out = []; xs.map((x) => out.push(x)); return out; })()", Verdict::NoCheat);
+}

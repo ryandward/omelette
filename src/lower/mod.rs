@@ -169,6 +169,8 @@ pub struct Lowerer<'a, 'l> {
     choices: Vec<(Val<'a>, Val<'a>, Val<'a>)>,
     /// The last local reference allocated.
     next_ref: u32,
+    /// The arrays whose text is being written, innermost last.
+    joining: Vec<value::RefKey>,
     /// The receiver of the list method being lowered, which its callbacks receive.
     this: Option<Val<'a>>,
     /// The references being resolved into a term, innermost last.
@@ -203,6 +205,7 @@ impl<'l> Lowerer<'_, 'l> {
             choices: Vec::new(),
             next_ref: 0,
             this: None,
+            joining: Vec::new(),
             resolving: Vec::new(),
             embedded: std::collections::HashSet::new(),
             resolved: HashMap::new(),
