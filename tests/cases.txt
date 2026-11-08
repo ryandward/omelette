@@ -113,3 +113,9 @@ UNDECIDED	declare const names: (string | undefined)[]; names[i] ?? 'x'
 no cheat	declare const widths: number[]; widths[i] === undefined ? 'n/a' : widths[i] + 1
 CHEAT	declare const widths: number[]; widths[i] + 1
 no cheat	declare const flags: boolean[]; flags[i] + 1
+CHEAT	(() => { try { return names[i].length; } catch { return 0; } })()
+CHEAT	(() => { try { return names[i].length; } catch {} return 0; })()
+no cheat	declare const names: string[]; (() => { try { return names[i].length; } catch { return -1; } })()
+CHEAT	declare const names: string[]; (() => { try { return names[i].length; } catch { return 0; } })()
+UNDECIDED	(() => { try { return names[i].length; } catch (e) { return e; } })()
+UNDECIDED	(() => { try { return f(names[i]); } catch { return 0; } })()

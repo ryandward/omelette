@@ -184,9 +184,11 @@ fn a_throw_is_an_effect_not_a_value() {
 
 #[test]
 fn evaluating_what_is_not_modeled_leaves_the_value_unknown() {
-    for source in ["[null.x, 1][1]", "[(() => { throw 1 })(), 1][1]", "[f(1), 2][1]"] {
+    for source in ["[null.x, 1][1]", "[new Foo(), 1][1]", "[f(1), 2][1]"] {
         checked(source, Verdict::Undecided);
     }
+    // `throw` is modeled: the list's construction throws before the read.
+    value("[(() => { throw 1 })(), 1][1]", "throw");
 }
 
 #[test]

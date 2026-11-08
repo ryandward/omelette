@@ -146,6 +146,12 @@ impl<'a> Lowerer<'a, '_> {
                 self.run(&inner)
             }
             Statement::EmptyStatement(_) => self.run(rest),
+            Statement::TryStatement(t) => self.attempt(t, rest),
+            // What is thrown matters only to a handler, which binds an unknown value.
+            Statement::ThrowStatement(t) => {
+                let v = self.expr(&t.argument);
+                self.strict(vec![v], &mut |_, _| Val::Throw)
+            }
             Statement::ExpressionStatement(e) => {
                 let v = self.expr(&e.expression);
                 self.strict(vec![v], &mut |l, _| l.run(rest))
@@ -156,6 +162,48 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// `try { ... } catch { ... }`, then `rest`: the block's value where it does not throw, and
+    /// the handler's, followed by `rest`, where it does. Only a block that ends in `return` is
+    /// modeled, so the block never falls through, and a throw after the statement cannot reach
+    /// the handler; `finally` is not modeled.
+    fn attempt(&mut self, t: &'a oxc_ast::ast::TryStatement<'a>, rest: &[&'a Statement<'a>]) -> Val<'a> {
+        let (Some(handler), None, Some(Statement::ReturnStatement(_))) = (&t.handler, &t.finalizer, t.block.body.last()) else {
+            return self.unsupported();
+        };
+        let block: Vec<_> = t.block.body.iter().collect();
+        let value = self.run(&block);
+        let caught: Vec<_> = handler.body.body.iter().chain(rest.iter().copied()).collect();
+        self.catch(value, &mut |l| {
+            if let Some(param) = &handler.param {
+                // A thrown value may be anything, `undefined` included.
+                let error = l.dynamic("error", &[], Ty::Any);
+                if !l.bind(&param.pattern, error) {
+                    return l.unsupported();
+                }
+            }
+            l.run(&caught)
+        })
+    }
+    /// `v` where it does not throw, and the handler's value where it does. A catch turns the
+    /// worlds that throw into an ordinary value, as a fallback does a missing read, so in a
+    /// read's absent world it writes a `default`. A value that may throw for reasons lowering
+    /// cannot name is not modeled.
+    fn catch(&mut self, v: Val<'a>, handler: &mut dyn FnMut(&mut Self) -> Val<'a>) -> Val<'a> {
+        match v {
+            Val::Throw => handler(self),
+            Val::Split(_) => self.lift(v, Family::Default, &mut |l, v| l.catch(v, handler)),
+            v if !self.may_raise(&v) => v,
+            v => match self.throws_when(&v) {
+                Some(Val::Bool(true)) => handler(self),
+                Some(test) => {
+                    let join = super::refs::Join::Test { test, first_if: false };
+                    let (normal, caught) = self.fork(&mut |l, second| if second { handler(l) } else { v.clone() }, &join);
+                    self.join(&join, normal, caught)
+                }
+                None => self.unsupported(),
+            },
+        }
+    }
     /// What a list method does before it runs, when that decides it: a callback that is not
     /// a function throws, and `flat` is modeled at depth one, or zero, which copies.
     fn precheck(&mut self, receiver: &Val<'a>, name: &str, args: &[Val<'a>]) -> Option<Val<'a>> {

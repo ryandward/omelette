@@ -79,6 +79,8 @@ These are not cheats:
 - the index is proven in range: `names.map((n, i) => names[i])`, `xs.map((x) => xs[0] ?? 0)`;
 - the operation speaks for a whole list: `names.every((n) => n !== 'off')`, `names.join(', ')`, `names.map(Number)`, `names.filter(Boolean)`.
 
+A `catch` is a fallback too. In `(() => { try { return names[i].length; } catch { return 0; } })()`, the missing read throws and the handler writes `0`, which a present `''` also gives, so it is a `default` cheat. With `declare const names: string[];` and `return -1`, it is honest. A `try` block is modeled when it ends in `return`, so it never falls through; a value that may throw for a reason lowering cannot name, such as an unknown call, leaves the verdict undecided, and `finally` is not modeled.
+
 `JSON.stringify(names[i])` passes the missing read on as `undefined`, but a present function writes `undefined` too, so it is undecided until the elements' types rule functions out.
 
 ### The image test
