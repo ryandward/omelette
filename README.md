@@ -4,7 +4,7 @@ An in-process Rust probe for absence laundering in JavaScript/TypeScript express
 
 It also reports observable mutation: whether the expression changes, in place, an array or object the caller holds. `xs.sort()` and `groups[i].push(x)` do. `[...xs].sort()` and `(() => { const a = []; a.push(x); return a; })()` mutate only an array they built themselves, which nobody else can see.
 
-The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 73 absence cases in [tests/cases.txt](tests/cases.txt) and the 64 mutation cases in [tests/mutations.txt](tests/mutations.txt) reach saturation with their expected verdicts. [tests/soundness.rs](tests/soundness.rs) and [tests/mutation.rs](tests/mutation.rs) hold the regressions from the soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
+The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 121 absence cases in [tests/cases.txt](tests/cases.txt) and the 66 mutation cases in [tests/mutations.txt](tests/mutations.txt) reach saturation with their expected verdicts. [tests/soundness.rs](tests/soundness.rs) and [tests/mutation.rs](tests/mutation.rs) hold the regressions from the soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
 
 ## Run and embed
 
