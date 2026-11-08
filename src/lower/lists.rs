@@ -2,7 +2,7 @@
 use super::Lowerer;
 use super::value::{Items, Seq, Short, Split, Ty, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family};
+use crate::core::{Core, Family, Shape};
 use egg::Id;
 use std::rc::Rc;
 
@@ -103,7 +103,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef => Val::Undef,
             _ if m.writes => {
                 let at = Val::Num(index.clone());
-                l.dynamic("mapped", &[&Val::Term(list, Ty::List(Items::Any)), &at], Ty::Any)
+                l.dynamic("mapped", &[&Val::Term(list, Ty::List(Items::ANY)), &at], Ty::Any)
             }
             x => {
                 let (outer, choices) = (l.state.cells.clone(), l.choices.len());
@@ -139,7 +139,7 @@ impl<'a> Lowerer<'a, '_> {
         if let Some(&e) = self.elems.get(&read) {
             return e;
         }
-        let e = self.b.fresh(items.kind());
+        let e = self.b.element(items);
         self.elems.insert(read, e);
         if let Core::Read([list, _]) = self.b.node(read) {
             self.members.insert(e, *list);
@@ -149,7 +149,7 @@ impl<'a> Lowerer<'a, '_> {
     /// A literal list as a term.
     pub fn seq(&mut self, items: &Rc<Vec<Val<'a>>>) -> Seq {
         let list = Val::List(items.clone());
-        let elements = list.items().unwrap_or(Items::Any);
+        let elements = list.items().unwrap_or(Items::ANY);
         Seq { id: self.emit(&list), items: elements }
     }
     /// The element of a list of at most one element: absent, or the element if kept.
@@ -194,6 +194,10 @@ impl<'a> Lowerer<'a, '_> {
             Val::Str(s) => Val::int(i64::try_from(s.units().len()).unwrap_or(i64::MAX)),
             Val::Short(s) => self.short_length(&s),
             Val::Term(id, Ty::List(_) | Ty::Str) => Val::Num(Form::atom(self.b.add(Core::Len(id)))),
+            // A number's or a boolean's length is undefined.
+            Val::Term(..) if self.shape(&v).within(Shape::NUM.or(Shape::BOOL)) => Val::Undef,
+            // A value that is a string or a list has a length either way.
+            Val::Term(id, _) if self.shape(&v).within(Shape::STR.or(Shape::LIST)) => Val::Num(Form::atom(self.b.add(Core::Len(id)))),
             Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Term(_, Ty::Bool) => Val::Undef,
             Val::Fun(_) | Val::Builtin(_) => self.unsupported(),
             // A number's or a boolean's length is undefined; anything else's may be anything.
@@ -244,10 +248,10 @@ impl<'a> Lowerer<'a, '_> {
             }
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             Val::Str(s) => Val::List(Rc::new(code_points(&s.units()).into_iter().map(Val::Str).collect())),
-            Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::Defined)),
+            Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::DEFINED)),
             Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Builtin(_) | Val::Term(_, Ty::Bool) => Val::Throw,
             Val::Term(_, Ty::Defined | Ty::Any) | Val::Split(_) => {
-                let spread = self.dynamic("iterate", &[&v], Ty::List(Items::Any));
+                let spread = self.dynamic("iterate", &[&v], Ty::List(Items::ANY));
                 self.clobber();
                 spread
             }

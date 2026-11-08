@@ -1,7 +1,7 @@
 //! Interned construction of core terms and emission of lowered values.
-use super::value::{Split, Val};
+use super::value::{Items, Split, Val};
 use crate::affine::Form;
-use crate::core::{Core, Kind, Utf16, Variable};
+use crate::core::{Core, Kind, Known, Shape, Utf16, Variable, items_of, shape_of};
 use egg::{Id, Language, RecExpr, Symbol};
 use std::collections::HashMap;
 
@@ -10,6 +10,26 @@ pub struct Builder {
     out: RecExpr<Core>,
     intern: HashMap<Core, Id>,
     fresh: u32,
+    /// Each term's shape and, for a list, its elements' shape, as the analysis computes them.
+    facts: Vec<(Shape, Shape)>,
+}
+
+impl Known for Builder {
+    fn shape(&self, id: Id) -> Shape {
+        self.facts[usize::from(id)].0
+    }
+    fn items(&self, id: Id) -> Shape {
+        self.facts[usize::from(id)].1
+    }
+    fn returns(&self, lam: Id) -> (Shape, Shape) {
+        match &self.out[lam] {
+            Core::Lam(children) => children.last().map_or((Shape::ALL, Shape::ALL), |&body| self.facts[usize::from(body)]),
+            _ => (Shape::ALL, Shape::ALL),
+        }
+    }
+    fn declared(&self, id: Id) -> Option<Shape> {
+        if let Core::Kinds(s) = self.out[id] { Some(s) } else { None }
+    }
 }
 
 impl Builder {
@@ -17,7 +37,9 @@ impl Builder {
         if let Some(&id) = self.intern.get(&node) {
             return id;
         }
+        let facts = (shape_of(&node, self), items_of(&node, self));
         let id = self.out.add(node.clone());
+        self.facts.push(facts);
         self.intern.insert(node, id);
         id
     }
@@ -39,6 +61,12 @@ impl Builder {
         self.fresh += 1;
         let name = format!("@{}", self.fresh);
         self.var(kind, &name)
+    }
+    /// A fresh binder for an element of a list with these elements.
+    pub fn element(&mut self, items: Items) -> Id {
+        self.fresh += 1;
+        let name = format!("@{}", self.fresh);
+        self.shaped_var(items.kind(), &name, items.0)
     }
     /// A construct lowering does not model, kept distinct from every other.
     pub fn unsupported(&mut self) -> Id {

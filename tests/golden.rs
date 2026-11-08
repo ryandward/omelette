@@ -20,6 +20,18 @@ fn malformed_input_is_an_error_and_limits_are_undecided() {
     for source in ["widths[", "x; y", "x trailing"] {
         assert!(evaluate(source).is_err(), "{source}");
     }
+    // A declaration must give a type the model holds, to a variable that is not a global it
+    // models, and only declarations may precede the expression.
+    for source in [
+        "declare const xs: null[]; xs[i]",
+        "declare const n: bigint; n",
+        "declare const String: string; 1",
+        "declare const xs; xs",
+        "declare const xs: string[]; let y = 1; y",
+        "declare const xs: string[]; declare const xs: number[]; xs",
+    ] {
+        assert!(evaluate(source).is_err(), "{source}");
+    }
     for source in ["xs?.foo(1)", "({ x: 1 }).x", "null ?? 0", "1.5", "xs.foo(1)"] {
         assert_eq!(evaluate(source).unwrap().verdict, Verdict::Undecided, "{source}");
     }

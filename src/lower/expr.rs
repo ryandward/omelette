@@ -112,12 +112,18 @@ impl<'a> Lowerer<'a, '_> {
             _ => {}
         }
         let kind = self.kinds.get(name).copied().unwrap_or(Kind::Any);
-        let var = self.b.var(kind, name);
+        if kind == Kind::List {
+            return Val::Ref(RefKey::Input(egg::Symbol::from(name)));
+        }
+        let shape = match self.declared.get(name) {
+            Some(super::declare::Declared::Value(s)) => *s,
+            _ => kind.shape(),
+        };
+        let var = self.b.shaped_var(kind, name, shape);
         match kind {
             Kind::Int => Val::Num(Form::atom(var)),
-            Kind::List => Val::Ref(RefKey::Input(egg::Symbol::from(name))),
             Kind::Fun => Val::Term(var, Ty::Defined),
-            _ => Val::Term(var, Ty::Any),
+            _ => Val::Term(var, Ty::of(shape)),
         }
     }
 }

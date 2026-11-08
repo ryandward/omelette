@@ -1,6 +1,6 @@
 //! The facts egg tracks: known constants, integer bounds, and the types a value can have.
 use crate::affine::Form;
-use crate::core::{Core, Kind, Shape, Utf16};
+use crate::core::{Core, Kind, Known, Shape, Utf16, items_of, shape_of};
 use egg::{Analysis, DidMerge, EGraph, Id};
 
 pub type Graph = EGraph<Core, Facts>;
@@ -39,7 +39,8 @@ impl Analysis<Core> for Facts {
             Some(Const::Int(v)) => (Some(*v), Some(*v)),
             _ => bounds(g, n),
         };
-        Data { constant, lo, hi, shape: shape(g, n), items: items(g, n), clash: false }
+        let known = Classes(g);
+        Data { constant, lo, hi, shape: shape_of(n, &known), items: items_of(n, &known), clash: false }
     }
     fn merge(&mut self, a: &mut Data, b: Data) -> DidMerge {
         let old = a.clone();
@@ -73,78 +74,32 @@ impl Analysis<Core> for Facts {
     }
 }
 
-/// The types a node's value can have, from its operation and its children's types.
-fn shape(g: &Graph, n: &Core) -> Shape {
-    let of = |id: &Id| g[*id].data.shape;
-    let items = |id: &Id| g[*id].data.items;
-    match n {
-        Core::At([xs, _]) => items(xs),
-        Core::Read([xs, _]) => items(xs).or(Shape::UNDEF),
-        Core::Undef => Shape::UNDEF,
-        Core::NaN | Core::Int(_) | Core::Lin(_) | Core::Mul(_) | Core::Len(_) => Shape::NUM,
-        Core::True
-        | Core::False
-        | Core::Le(_)
-        | Core::Lt(_)
-        | Core::Not(_)
-        | Core::And(_)
-        | Core::Or(_)
-        | Core::Eq(_)
-        | Core::Every(_)
-        | Core::Some(_)
-        | Core::Has(_) => Shape::BOOL,
-        Core::Str(_) | Core::Concat(_) | Core::Text(_) | Core::Join(_) => Shape::STR,
-        Core::Nil
-        | Core::Cons(_)
-        | Core::Append(_)
-        | Core::Slice(_)
-        | Core::Map(_)
-        | Core::Filter(_)
-        | Core::Flat(_)
-        | Core::Sort(_)
-        | Core::Reverse(_) => Shape::LIST,
-        Core::Lam(_) => Shape::FUN,
-        Core::Throw => Shape::NONE,
-        Core::If([_, yes, no]) => of(yes).or(of(no)),
-        Core::Maybe([_, z, lam, ..]) | Core::Elim([z, lam, ..]) => of(z).or(returns(g, *lam, |d| d.shape)),
-        Core::Escape([v, _]) => of(v).or(Shape::UNDEF),
-        Core::Dyn(children) | Core::DynUndef(children) => children.get(1).and_then(|k| declared(g, *k)).unwrap_or(Shape::ALL),
-        Core::Var(v) => v.values(),
-        _ => Shape::ALL,
+/// The facts a class's children have, as node shapes read them.
+struct Classes<'g>(&'g Graph);
+
+impl Known for Classes<'_> {
+    fn shape(&self, id: Id) -> Shape {
+        self.0[id].data.shape
     }
-}
-
-/// The types a list's elements can have, from its operation and its children's.
-fn items(g: &Graph, n: &Core) -> Shape {
-    let items = |id: &Id| g[*id].data.items;
-    match n {
-        Core::Nil => Shape::NONE,
-        Core::Cons([head, tail]) => g[*head].data.shape.or(items(tail)),
-        Core::Append([a, b]) | Core::If([_, a, b]) => items(a).or(items(b)),
-        Core::Slice([xs, ..]) | Core::Filter([_, xs]) | Core::Sort([_, xs]) | Core::Reverse(xs) => items(xs),
-        Core::Map([f, _]) => returns(g, *f, |d| d.shape),
-        // Flattening keeps the elements that are not lists and spreads the ones that are.
-        Core::Flat(xs) if !items(xs).meets(Shape::LIST) => items(xs),
-        Core::Maybe([_, z, lam, ..]) | Core::Elim([z, lam, ..]) => items(z).or(returns(g, *lam, |d| d.items)),
-        Core::Var(v) => v.items(),
-        _ => Shape::ALL,
+    fn items(&self, id: Id) -> Shape {
+        self.0[id].data.items
     }
-}
-
-/// A fact about what a lambda's body can produce. Every lambda in a class is one
-/// function, so each body's fact bounds it.
-pub fn returns(g: &Graph, lam: Id, fact: impl Fn(&Data) -> Shape) -> Shape {
-    g[lam].nodes.iter().fold(Shape::ALL, |shape, n| match n {
-        Core::Lam(children) => children.last().map_or(shape, |b| shape.and(fact(&g[*b].data))),
-        _ => shape,
-    })
-}
-
-fn declared(g: &Graph, id: Id) -> Option<Shape> {
-    g[id].nodes.iter().find_map(|n| match n {
-        Core::Kinds(s) => Some(*s),
-        _ => None,
-    })
+    /// Every lambda in a class is one function, so each body's facts bound it.
+    fn returns(&self, lam: Id) -> (Shape, Shape) {
+        self.0[lam].nodes.iter().fold((Shape::ALL, Shape::ALL), |(shape, items), n| match n {
+            Core::Lam(children) => children.last().map_or((shape, items), |b| {
+                let d = &self.0[*b].data;
+                (shape.and(d.shape), items.and(d.items))
+            }),
+            _ => (shape, items),
+        })
+    }
+    fn declared(&self, id: Id) -> Option<Shape> {
+        self.0[id].nodes.iter().find_map(|n| match n {
+            Core::Kinds(s) => Some(*s),
+            _ => None,
+        })
+    }
 }
 
 fn max_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {

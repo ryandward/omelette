@@ -16,6 +16,7 @@ cargo build --release
 ./target/release/omelette "names.slice(i, i + 1).every((n) => n !== 'off')"
 ./target/release/omelette 'users.map((_, i) => roles[i])' --all
 ./target/release/omelette --joint "names[i] !== 'off'" "names[i] === undefined || names[i] !== 'off'"
+./target/release/omelette "declare const widths: number[]; widths[i] ?? 'none'"
 ./scripts/check.sh
 node scripts/differential.js FILE
 cargo test --release
@@ -86,7 +87,13 @@ A fallback `z` erases the missing read exactly when `z` is also the result of so
 
 An input list's elements are never `undefined`, but nothing else is known about them: an element may be any value, including an object with any `length`. So `names[i] === undefined ? [] : names[i].length` is a cheat, because `{ length: [] }` is an element too.
 
-`scripts/erasure.js` checks verdicts against this definition. It takes expressions that mention `xs` only as `xs[i]` (and optionally a context `c`, `j`), evaluates each on a missing read and on a pool of present elements in Node, and fails on a `no cheat` where some element gives the missing read's result.
+### Declared types
+
+Leading `declare const` statements give free variables TypeScript types, which narrow what their values and elements can be. With `declare const names: string[];`, `names[i] === undefined ? [] : names[i].length` is honest, `names[i] ?? 0` is honest (no string is `0`), and `names[i] ?? ''` is still a cheat. With `declare const users: object[];`, `Boolean(users[i])` is honest: an object is always truthy, so `false` marks the missing read. With `declare const widths: number[];`, `JSON.stringify(widths[i])` is honest, since a number always writes text.
+
+TypeScript checks structure, and so does the model. `object` admits arrays and functions. `Object`, `{}`, and `Record` admit primitives too. A type literal rules primitives out only when it requires a member no string, number, or boolean has, so `{ id: number }[]` elements are always truthy, but `{ length: number }[]` elements may be strings, `''` among them. A type omelette does not resolve, such as an interface or an alias, admits anything. An element type that admits `undefined`, as in `(string | undefined)[]`, makes a present element indistinguishable from a missing one, so a branch that varies there is undecided. `null`, `bigint`, and `symbol` are not modeled, and a declaration that admits them is an error, as is one that redeclares a global omelette models, such as `String`.
+
+`scripts/erasure.js` checks verdicts against this definition. It takes expressions that mention `xs` only at `i` (as `xs[i]`, `xs.at(i)`, or `xs.slice(i, i + 1)`), optionally with a context `c`, `j` and a declared element type. It evaluates each on a missing read and on a pool of present elements in Node, and fails on a `no cheat` where some element gives the missing read's result. A present `undefined` collides with every missing read, whatever the program, so it does not count.
 
 Where an unknown decides the flow, the verdict is `UNDECIDED`. `names[i] === x` only tests presence when `x` is `undefined`. `xs.slice(i, i + 1).some(p)` does too when `p` always returns `true`, and it is constant when `p` always returns `false`.
 

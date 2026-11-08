@@ -100,3 +100,16 @@ no cheat	names.filter(Boolean)
 CHEAT	String(names.slice(i, i + 1))
 CHEAT	[names[i]].sort().join()
 CHEAT	[names[i]] < 1
+CHEAT	declare const names: string[]; names[i] ?? ''
+no cheat	declare const names: string[]; names[i] ?? 0
+no cheat	declare const widths: number[]; widths[i] ?? 'none'
+no cheat	declare const users: object[]; Boolean(users[i])
+no cheat	declare const users: { id: number }[]; !!users[i]
+CHEAT	declare const items: { length: number }[]; !!items[i]
+no cheat	declare const widths: number[]; JSON.stringify(widths[i])
+UNDECIDED	declare const users: object[]; JSON.stringify(users[i])
+no cheat	declare const names: string[]; names[i] === undefined ? -1 : names[i].length
+UNDECIDED	declare const names: (string | undefined)[]; names[i] ?? 'x'
+no cheat	declare const widths: number[]; widths[i] === undefined ? 'n/a' : widths[i] + 1
+CHEAT	declare const widths: number[]; widths[i] + 1
+no cheat	declare const flags: boolean[]; flags[i] + 1

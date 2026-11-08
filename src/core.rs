@@ -296,11 +296,85 @@ impl Shape {
     pub fn meets(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
+    /// Some value, and every value, of this shape is also of `other`.
+    pub fn within(self, other: Self) -> bool {
+        self != Self::NONE && self.0 & !other.0 == 0
+    }
     pub fn letters(self) -> String {
         Self::LETTERS.iter().filter(|(_, s)| self.meets(*s)).map(|(c, _)| *c).collect()
     }
     pub fn parse(letters: &str) -> Option<Self> {
         letters.chars().try_fold(Self::NONE, |shape, c| Self::LETTERS.iter().find(|(l, _)| *l == c).map(|(_, s)| shape.or(*s)))
+    }
+}
+
+/// What a shape computation knows of a node's children.
+pub trait Known {
+    /// What the term can be.
+    fn shape(&self, id: Id) -> Shape;
+    /// When the term is a list, what its elements can be.
+    fn items(&self, id: Id) -> Shape;
+    /// What a lambda's body can be, and its elements.
+    fn returns(&self, lam: Id) -> (Shape, Shape);
+    /// The shape a `kinds` leaf declares.
+    fn declared(&self, id: Id) -> Option<Shape>;
+}
+
+/// The types a node's value can have, from its operation and what is known of its children.
+pub fn shape_of(n: &Core, known: &impl Known) -> Shape {
+    let of = |id: &Id| known.shape(*id);
+    let items = |id: &Id| known.items(*id);
+    match n {
+        Core::At([xs, _]) => items(xs),
+        Core::Read([xs, _]) => items(xs).or(Shape::UNDEF),
+        Core::Undef => Shape::UNDEF,
+        Core::NaN | Core::Int(_) | Core::Lin(_) | Core::Mul(_) | Core::Len(_) => Shape::NUM,
+        Core::True
+        | Core::False
+        | Core::Le(_)
+        | Core::Lt(_)
+        | Core::Not(_)
+        | Core::And(_)
+        | Core::Or(_)
+        | Core::Eq(_)
+        | Core::Every(_)
+        | Core::Some(_)
+        | Core::Has(_) => Shape::BOOL,
+        Core::Str(_) | Core::Concat(_) | Core::Text(_) | Core::Join(_) => Shape::STR,
+        Core::Nil
+        | Core::Cons(_)
+        | Core::Append(_)
+        | Core::Slice(_)
+        | Core::Map(_)
+        | Core::Filter(_)
+        | Core::Flat(_)
+        | Core::Sort(_)
+        | Core::Reverse(_) => Shape::LIST,
+        Core::Lam(_) => Shape::FUN,
+        Core::Throw => Shape::NONE,
+        Core::If([_, yes, no]) => of(yes).or(of(no)),
+        Core::Maybe([_, z, lam, ..]) | Core::Elim([z, lam, ..]) => of(z).or(known.returns(*lam).0),
+        Core::Escape([v, _]) => of(v).or(Shape::UNDEF),
+        Core::Dyn(children) | Core::DynUndef(children) => children.get(1).and_then(|k| known.declared(*k)).unwrap_or(Shape::ALL),
+        Core::Var(v) => v.values(),
+        _ => Shape::ALL,
+    }
+}
+
+/// When a node is a list, the types its elements can have.
+pub fn items_of(n: &Core, known: &impl Known) -> Shape {
+    let items = |id: &Id| known.items(*id);
+    match n {
+        Core::Nil => Shape::NONE,
+        Core::Cons([head, tail]) => known.shape(*head).or(items(tail)),
+        Core::Append([a, b]) | Core::If([_, a, b]) => items(a).or(items(b)),
+        Core::Slice([xs, ..]) | Core::Filter([_, xs]) | Core::Sort([_, xs]) | Core::Reverse(xs) => items(xs),
+        Core::Map([f, _]) => known.returns(*f).0,
+        // Flattening keeps the elements that are not lists and spreads the ones that are.
+        Core::Flat(xs) if !items(xs).meets(Shape::LIST) => items(xs),
+        Core::Maybe([_, z, lam, ..]) | Core::Elim([z, lam, ..]) => items(z).or(known.returns(*lam).1),
+        Core::Var(v) => v.items(),
+        _ => Shape::ALL,
     }
 }
 

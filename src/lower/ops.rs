@@ -188,7 +188,9 @@ impl<'a> Lowerer<'a, '_> {
     }
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         // Arithmetic reads a known string or list as the number it spells.
-        let mut known = |v: &Val<'a>| if matches!(v, Val::Str(_)) || v.items().is_some() { self.to_number(v.clone()) } else { v.clone() };
+        let mut known = |v: &Val<'a>| {
+            if matches!(v, Val::Str(_) | Val::Term(_, Ty::Bool)) || v.items().is_some() { self.to_number(v.clone()) } else { v.clone() }
+        };
         let (a, b) = (&known(a), &known(b));
         let (Some(lhs), Some(rhs)) = (numeric(a), numeric(b)) else {
             // `undefined` and `NaN` make arithmetic NaN, but `+` concatenates when the other
@@ -197,7 +199,8 @@ impl<'a> Lowerer<'a, '_> {
                 Bin::Add => (poisons(a) && numeric_typed(b)) || (poisons(b) && numeric_typed(a)),
                 _ => poisons(a) || poisons(b),
             };
-            return if poisoned { Val::NaN } else { self.shaped(op_name(op), &[a, b], Ty::Defined, arithmetic(op)) };
+            let shape = arithmetic(op, self.shape(a), self.shape(b));
+            return if poisoned { Val::NaN } else { self.shaped(op_name(op), &[a, b], Ty::Defined, shape) };
         };
         let form = match op {
             Bin::Sub => lhs.plus(&rhs, -1),
@@ -210,7 +213,10 @@ impl<'a> Lowerer<'a, '_> {
         };
         match form {
             Some(f) if exact(&f) => Val::Num(f),
-            _ => self.shaped(op_name(op), &[a, b], Ty::Defined, arithmetic(op)),
+            _ => {
+                let shape = arithmetic(op, self.shape(a), self.shape(b));
+                self.shaped(op_name(op), &[a, b], Ty::Defined, shape)
+            }
         }
     }
     fn product(&mut self, x: &Form, y: &Form) -> Val<'a> {
@@ -300,6 +306,9 @@ impl<'a> Lowerer<'a, '_> {
                 let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
             }
+            // Objects, arrays, and functions are truthy; `undefined` is not.
+            Val::Term(..) if self.shape(&v).within(Shape::LIST.or(Shape::OBJ).or(Shape::FUN)) => Val::Bool(true),
+            Val::Term(..) if self.shape(&v) == Shape::UNDEF => Val::Bool(false),
             Val::Term(_, Ty::Defined | Ty::Any) => self.dynamic("truthy", &[&v], Ty::Bool),
         }
     }
@@ -317,11 +326,36 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// The JavaScript types a lowered value can have.
+    pub fn shape(&self, v: &Val<'a>) -> Shape {
+        use crate::core::Known;
+        match v {
+            Val::Undef => Shape::UNDEF,
+            Val::NaN | Val::Num(_) => Shape::NUM,
+            Val::Throw => Shape::NONE,
+            Val::Bool(_) => Shape::BOOL,
+            Val::Str(_) => Shape::STR,
+            Val::List(_) | Val::Short(_) | Val::Ref(_) => Shape::LIST,
+            Val::Fun(_) | Val::Builtin(_) => Shape::FUN,
+            Val::Split(s) => self.shape(&s.absent).or(self.shape(&s.present)),
+            Val::Term(id, ty) => {
+                let typed = match ty {
+                    Ty::Bool => Shape::BOOL,
+                    Ty::Str => Shape::STR,
+                    Ty::List(_) => Shape::LIST,
+                    Ty::Defined => Shape::DEFINED,
+                    Ty::Any => Shape::ALL,
+                };
+                self.b.shape(*id).and(typed)
+            }
+        }
+    }
     pub fn to_text(&mut self, v: Val<'a>) -> Val<'a> {
         let text = |s: &str| Val::Str(Utf16::new(s.encode_utf16()));
         let v = self.deref(v);
         match v {
             Val::Str(_) | Val::Term(_, Ty::Str) | Val::Throw => v,
+            Val::Term(_, Ty::Bool) => self.select(&v, text("true"), text("false")),
             Val::Undef => text("undefined"),
             Val::NaN => text("NaN"),
             Val::Bool(b) => text(if b { "true" } else { "false" }),
@@ -363,8 +397,10 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 /// What arithmetic produces: a number, or for `+` a string when it concatenates.
-fn arithmetic(op: Bin) -> Shape {
-    if op == Bin::Add { Shape::NUM.or(Shape::STR) } else { Shape::NUM }
+fn arithmetic(op: Bin, a: Shape, b: Shape) -> Shape {
+    // `+` concatenates when an operand is, or converts to, a string.
+    let textual = Shape::STR.or(Shape::LIST).or(Shape::OBJ).or(Shape::FUN);
+    if op == Bin::Add && (a.meets(textual) || b.meets(textual)) { Shape::NUM.or(Shape::STR) } else { Shape::NUM }
 }
 
 fn op_name(op: Bin) -> &'static str {

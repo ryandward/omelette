@@ -41,6 +41,13 @@ pub enum Join<'a> {
 
 impl<'a> Lowerer<'a, '_> {
     /// An array's current contents: what the store holds for a reference, or the value itself.
+    /// What an input list's elements are: what its declaration says, or defined.
+    fn input_items(&self, name: &str) -> Items {
+        match self.declared.get(name) {
+            Some(super::declare::Declared::List(items)) => Items(*items),
+            _ => Items::DEFINED,
+        }
+    }
     pub fn deref(&mut self, v: Val<'a>) -> Val<'a> {
         let Val::Ref(key) = v else { return v };
         if let Some(contents) = self.state.cells.get(&key) {
@@ -49,10 +56,15 @@ impl<'a> Lowerer<'a, '_> {
             return self.deref(contents);
         }
         match key {
-            RefKey::Input(name) if self.state.epoch == 0 => Val::Term(self.b.var(Kind::List, name.as_str()), Ty::List(Items::Defined)),
+            RefKey::Input(name) if self.state.epoch == 0 => {
+                let items = self.input_items(name.as_str());
+                Val::Term(self.b.shaped_var(Kind::List, name.as_str(), items.0), Ty::List(items))
+            }
             RefKey::Input(name) => {
-                let (var, epoch) = (Val::Term(self.b.var(Kind::List, name.as_str()), Ty::Any), Val::int(i64::from(self.state.epoch)));
-                self.dynamic("havoc", &[&var, &epoch], Ty::List(Items::Any))
+                let items = self.input_items(name.as_str());
+                let var = Val::Term(self.b.shaped_var(Kind::List, name.as_str(), items.0), Ty::Any);
+                let epoch = Val::int(i64::from(self.state.epoch));
+                self.dynamic("havoc", &[&var, &epoch], Ty::List(Items::ANY))
             }
             RefKey::Choice(n) => {
                 let (test, a, b) = self.choices[n].clone();
@@ -420,7 +432,7 @@ impl<'a> Lowerer<'a, '_> {
     pub fn unknown_list(&mut self) -> Val<'a> {
         self.next_ref += 1;
         let tag = Val::int(i64::from(self.next_ref));
-        self.dynamic("havoc", &[&tag], Ty::List(Items::Any))
+        self.dynamic("havoc", &[&tag], Ty::List(Items::ANY))
     }
 }
 

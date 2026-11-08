@@ -1,6 +1,6 @@
 //! The static value domain of the partial evaluator.
 use crate::affine::Form;
-use crate::core::{Family, Kind, Utf16};
+use crate::core::{Family, Kind, Shape, Utf16};
 use egg::{Id, Symbol};
 use oxc_ast::ast::{Expression, FormalParameters, FunctionBody};
 use oxc_semantic::SymbolId;
@@ -19,35 +19,43 @@ pub enum Ty {
     Any,
 }
 
-/// Whether every element of a list is defined: by the model's precondition on a free list,
-/// or because every value put into the list is.
+/// What a list's elements can be: by the model's precondition on a free list (defined, or
+/// what a declaration says), or because of the values put into the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Items {
-    Defined,
-    Any,
-}
+pub struct Items(pub Shape);
 
 impl Items {
+    pub const DEFINED: Self = Self(Shape::DEFINED);
+    pub const ANY: Self = Self(Shape::ALL);
     pub fn of(defined: bool) -> Self {
-        if defined { Self::Defined } else { Self::Any }
+        if defined { Self::DEFINED } else { Self::ANY }
     }
     /// The elements of a list built from lists with these elements.
     #[must_use]
     pub fn both(self, other: Self) -> Self {
-        Self::of(self == Self::Defined && other == Self::Defined)
+        Self(self.0.or(other.0))
     }
     /// The type of one element.
     pub fn ty(self) -> Ty {
-        match self {
-            Self::Defined => Ty::Defined,
-            Self::Any => Ty::Any,
-        }
+        Ty::of(self.0)
     }
     /// The kind of an element binder.
     pub fn kind(self) -> Kind {
-        match self {
-            Self::Defined => Kind::Elem,
-            Self::Any => Kind::Item,
+        if self.0.meets(Shape::UNDEF) { Kind::Item } else { Kind::Elem }
+    }
+}
+
+impl Ty {
+    /// The static type of a value of `shape`.
+    pub fn of(shape: Shape) -> Self {
+        if shape == Shape::STR {
+            Self::Str
+        } else if shape == Shape::BOOL {
+            Self::Bool
+        } else if shape.meets(Shape::UNDEF) {
+            Self::Any
+        } else {
+            Self::Defined
         }
     }
 }

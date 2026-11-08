@@ -358,7 +358,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Ref(_) => l.deref(v),
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             v if v.is_known() || matches!(v, Val::Term(_, Ty::Bool | Ty::Str) | Val::Num(_)) => Val::List(Rc::new(vec![v])),
-            v => l.dynamic("spread", &[&v], Ty::List(Items::Any)),
+            v => l.dynamic("spread", &[&v], Ty::List(Items::ANY)),
         })
     }
     fn flat_items(&mut self, items: &Rc<Vec<Val<'a>>>) -> Val<'a> {
@@ -498,10 +498,10 @@ impl<'a> Lowerer<'a, '_> {
                 Val::Term(self.b.add(Core::Join([sep, list.id])), Ty::Str)
             }
             // A nested element's own elements are not covered by the precondition.
-            "flat" => Seq { id: self.b.add(Core::Flat(list.id)), items: Items::Any }.val(),
+            "flat" => Seq { id: self.b.add(Core::Flat(list.id)), items: Items::ANY }.val(),
             "flatMap" => {
                 let mapped = self.walker(Walker::Map, &f, list);
-                Seq { id: self.b.add(Core::Flat(mapped.id)), items: Items::Any }.val()
+                Seq { id: self.b.add(Core::Flat(mapped.id)), items: Items::ANY }.val()
             }
             "slice" => self.slice(list, args.first().cloned(), args.get(1).cloned()),
             "at" => self.at(list, f),
@@ -519,7 +519,7 @@ impl<'a> Lowerer<'a, '_> {
             other => {
                 let lam = self.emit(other);
                 self.clobber();
-                (lam, Items::Any)
+                (lam, Items::ANY)
             }
         };
         let node = self.b.add(match kind {
@@ -546,7 +546,7 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// The callback's lambda, and whether every value it returns is defined.
     fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> (Id, Items) {
-        let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        let (x, i) = (self.b.element(list.items), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         self.members.insert(x, list.id);
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
@@ -559,7 +559,7 @@ impl<'a> Lowerer<'a, '_> {
         self.built = matches!(result, Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)))
             || matches!(result, Val::Ref(super::value::RefKey::Local(k)) if k > before);
         self.passed = matches!(result, Val::Term(id, _) if id == x);
-        let items = Items::of(result.defined());
+        let items = Items(self.shape(&result));
         let body = if kind == Walker::Map {
             self.escape(&result)
         } else {
@@ -625,7 +625,7 @@ impl<'a> Lowerer<'a, '_> {
         self.projected_index(fun, list, other)
     }
     fn projected_index(&mut self, fun: &Fun<'a>, list: Seq, target: &'a Expression<'a>) -> Option<(Form, Id)> {
-        let (x, i) = (self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        let (x, i) = (self.b.element(list.items), self.b.fresh(Kind::Index));
         let saved = std::mem::replace(&mut self.env, fun.env.clone());
         let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
         // Recognizing a projection evaluates nothing; the walker that replaces it does. The
@@ -680,7 +680,7 @@ impl<'a> Lowerer<'a, '_> {
         if let Some(seed @ Val::Split(_)) = init {
             return self.lift(seed, Family::Undecided, &mut |l, z| l.fold(list, f, Some(z)));
         }
-        let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.fresh(list.items.kind()), self.b.fresh(Kind::Index));
+        let (acc, x, i) = (self.b.fresh(Kind::Acc), self.b.element(list.items), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         self.members.insert(x, list.id);
         let args = vec![Val::Term(acc, Ty::Any), Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];

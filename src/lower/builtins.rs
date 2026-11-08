@@ -176,8 +176,8 @@ impl<'a> Lowerer<'a, '_> {
             b @ Val::Term(_, Ty::Bool) => self.select(&b, text("true"), text("false")),
             // A list's text is always a string: its elements that have none write `null`.
             v @ (Val::Term(_, Ty::Str | Ty::List(_)) | Val::Short(_)) => self.shaped("json", &[&v], Ty::Str, Shape::STR),
-            // As an element, anything writes some text.
-            v if nested => self.shaped("json", &[&v], Ty::Str, Shape::STR),
+            // As an element, anything writes some text, and so does a primitive or a list.
+            v if nested || self.shape(&v).within(Shape::BOOL.or(Shape::NUM).or(Shape::STR).or(Shape::LIST)) => self.shaped("json", &[&v], Ty::Str, Shape::STR),
             // A function, or an object whose `toJSON` returns `undefined`, writes nothing.
             v => self.shaped("json", &[&v], Ty::Any, Shape::STR.or(Shape::UNDEF)),
         }

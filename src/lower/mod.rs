@@ -3,6 +3,7 @@
 mod build;
 mod builtins;
 mod calls;
+mod declare;
 mod expr;
 mod lists;
 mod mutate;
@@ -20,6 +21,7 @@ use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::SourceType;
 use std::collections::HashMap;
+use declare::Declared;
 use value::{Env, Val};
 
 /// A lowered expression.
@@ -34,10 +36,12 @@ pub struct Lowered {
     pub opaque: bool,
 }
 
-/// Lower one expression.
+/// Lower one expression, optionally after `declare const` statements that give free
+/// variables TypeScript types.
 ///
 /// # Errors
-/// A syntax error, or source that is not a single expression.
+/// A syntax error, source that is not a single expression after its declarations, or a
+/// declaration lowering does not accept.
 pub fn lower(source: &str) -> Result<Lowered, String> {
     Ok(lower_all(&[source])?.remove(0))
 }
@@ -49,7 +53,18 @@ pub fn lower(source: &str) -> Result<Lowered, String> {
 /// A syntax error, or a source that is not a single expression.
 pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
     let arena = Allocator::default();
-    let wrapped: Vec<String> = sources.iter().map(|s| format!("(\n{s}\n);")).collect();
+    let mut declared: HashMap<String, Declared> = HashMap::new();
+    let mut expressions = Vec::with_capacity(sources.len());
+    for &source in sources {
+        let (types, expression) = split_prelude(&arena, source)?;
+        for (name, ty) in types {
+            if declared.insert(name.clone(), ty).is_some_and(|old| old != ty) {
+                return Err(format!("`{name}` is declared twice"));
+            }
+        }
+        expressions.push(expression);
+    }
+    let wrapped: Vec<String> = expressions.iter().map(|s| format!("(\n{s}\n);")).collect();
     let programs = wrapped
         .iter()
         .map(|s| parse(&arena, s))
@@ -62,11 +77,14 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
     for semantic in &semantics {
         usage::classify(semantic, &mut kinds);
     }
+    for (name, ty) in &declared {
+        kinds.insert(name.clone(), declare::kind(*ty, kinds.get(name).copied()));
+    }
     Ok(programs
         .iter()
         .zip(&semantics)
         .map(|(program, semantic)| {
-            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds);
+            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, &declared);
             let value = lowerer.expr(expression(program));
             let root = lowerer.emit(&value);
             let log = lowerer.state.log.clone();
@@ -80,6 +98,19 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
             Lowered { expr: lowerer.b.finish(root), effects, opaque: lowerer.opaque }
         })
         .collect())
+}
+
+/// A source's declarations and its expression. Only a source that starts with `declare`
+/// has declarations; any other is all expression.
+fn split_prelude<'s>(arena: &Allocator, source: &'s str) -> Result<(HashMap<String, Declared>, &'s str), String> {
+    if !source.trim_start().starts_with("declare") {
+        return Ok((HashMap::new(), source));
+    }
+    let parsed = Parser::new(arena, source, SourceType::ts()).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(format!("{:?}", parsed.diagnostics));
+    }
+    declare::prelude(&parsed.program, source)
 }
 
 fn parse<'a>(arena: &'a Allocator, source: &'a str) -> Result<Program<'a>, String> {
@@ -106,6 +137,8 @@ pub struct Lowerer<'a, 'l> {
     b: Builder,
     scoping: &'l Scoping,
     kinds: &'l HashMap<String, Kind>,
+    /// What declarations say the free variables hold.
+    declared: &'l HashMap<String, Declared>,
     env: Env<'a>,
     /// Reads whose presence a branch has decided: absent, or the element.
     narrow: HashMap<Id, Val<'a>>,
@@ -147,11 +180,12 @@ pub struct Lowerer<'a, 'l> {
 }
 
 impl<'l> Lowerer<'_, 'l> {
-    fn new(scoping: &'l Scoping, kinds: &'l HashMap<String, Kind>) -> Self {
+    fn new(scoping: &'l Scoping, kinds: &'l HashMap<String, Kind>, declared: &'l HashMap<String, Declared>) -> Self {
         Self {
             b: Builder::default(),
             scoping,
             kinds,
+            declared,
             env: Env::new(),
             narrow: HashMap::new(),
             elems: HashMap::new(),

@@ -163,7 +163,7 @@ impl<'a> Lowerer<'a, '_> {
         match cmp {
             Val::Undef => self.b.add(Core::Undef),
             Val::Fun(_) => {
-                let (a, b) = (self.b.fresh(list.items.kind()), self.b.fresh(list.items.kind()));
+                let (a, b) = (self.b.element(list.items), self.b.element(list.items));
                 self.members.extend([(a, list.id), (b, list.id)]);
                 let args = vec![Val::Term(a, list.items.ty()), Val::Term(b, list.items.ty())];
                 // A comparator runs only on a list of two or more.
@@ -189,14 +189,14 @@ impl<'a> Lowerer<'a, '_> {
         }
         let mut parts = vec![c];
         parts.extend(args);
-        let removed = self.dynamic("spliced", &parts, Ty::List(Items::Any));
+        let removed = self.dynamic("spliced", &parts, Ty::List(Items::ANY));
         (removed, self.unknown_after(Mutator::Splice, c, args))
     }
     /// Contents after a mutation lowering does not compute: a list of unknown elements.
     fn unknown_after(&mut self, m: Mutator, c: &Val<'a>, args: &[Val<'a>]) -> Val<'a> {
         let mut parts = vec![c];
         parts.extend(args);
-        self.dynamic(m.name(), &parts, Ty::List(Items::Any))
+        self.dynamic(m.name(), &parts, Ty::List(Items::ANY))
     }
 }
 
