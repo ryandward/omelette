@@ -224,10 +224,10 @@ impl<'a> Lowerer<'a, '_> {
         self.lift(answer, Family::Propagate, &mut |l, v| match v {
             Val::Throw => Val::Throw,
             v if super::refs::holds_ref(&v) || matches!(v, Val::Fun(_) | Val::Builtin(_)) => v,
-            v => l.stand_in(&v, form, 0),
+            v => l.stand_in(&v, form),
         })
     }
-    fn stand_in(&mut self, answer: &Val<'a>, form: &super::declare::Form, tag: i64) -> Val<'a> {
+    fn stand_in(&mut self, answer: &Val<'a>, form: &super::declare::Form) -> Val<'a> {
         use super::declare::Form;
         match form {
             Form::Str(s) => Val::Str(*s),
@@ -242,16 +242,14 @@ impl<'a> Lowerer<'a, '_> {
                 self.remember(&stand_in, answer);
                 stand_in
             }
-            // One of the forms, chosen by tests on the answer that lowering does not decide.
+            // One of the forms: a `oneof` term over the answer and each form's stand-in, which
+            // detection finds apart from a replacement apart from every one.
             Form::Union(forms) => {
-                let Some((last, rest)) = forms.split_last() else { return Val::Throw };
-                let mut out = self.stand_in(answer, last, tag * 8 + 7);
-                for (k, f) in rest.iter().enumerate().rev() {
-                    let which = Val::int(tag * 8 + i64::try_from(k).unwrap_or(0));
-                    let test = self.shaped("is", &[answer, &which], Ty::Bool, Shape::BOOL);
-                    let arm = self.stand_in(answer, f, tag * 8 + i64::try_from(k).unwrap_or(0) + 1);
-                    out = self.select(&test, arm, out);
-                }
+                let alternatives: Vec<Val<'a>> = forms.iter().map(|f| self.stand_in(answer, f)).collect();
+                let shape = alternatives.iter().fold(Shape::NONE, |s, v| s.or(self.shape(v)));
+                let mut args: Vec<&Val<'a>> = vec![answer];
+                args.extend(alternatives.iter());
+                let out = self.shaped("oneof", &args, Ty::of(shape), shape);
                 self.remember(&out, answer);
                 out
             }
@@ -259,9 +257,14 @@ impl<'a> Lowerer<'a, '_> {
             Form::Record(fields) => {
                 let mut children = Vec::with_capacity(fields.len() * 2);
                 for (name, f) in fields {
-                    let key = Val::Str(*name);
-                    let field = self.shaped("field", &[answer, &key], Ty::Any, Shape::ALL);
-                    let value = self.stand_in(&field, f, tag);
+                    // A tag field's stand-in is the tag; only another needs the answer's field.
+                    let value = if f.literal() {
+                        self.stand_in(answer, f)
+                    } else {
+                        let key = Val::Str(*name);
+                        let field = self.shaped("field", &[answer, &key], Ty::Any, Shape::ALL);
+                        self.stand_in(&field, f)
+                    };
                     children.push(self.b.add(Core::Str(*name)));
                     children.push(self.emit(&value));
                 }

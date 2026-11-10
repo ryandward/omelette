@@ -132,6 +132,10 @@ pub struct Lowerer<'a, 'l> {
     /// Each stand-in for a declared or widened answer, with the exact answer, which control
     /// flow still follows.
     exact: HashMap<Id, Val<'a>>,
+    /// The node naming each kind of `dyn` operation.
+    names: HashMap<&'static str, Id>,
+    /// Each declared return type's form, by the type's address in the program.
+    forms: HashMap<usize, std::rc::Rc<declare::Form>>,
     /// The types the program names, through which a declared return type resolves.
     types: &'l declare::Types<'l, 'a>,
     /// The helpers the program defines before its expression, which any code may call.
@@ -188,6 +192,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             ambient: std::collections::HashSet::new(),
             types,
             exact: HashMap::new(),
+            forms: HashMap::new(),
+            names: HashMap::new(),
             defined: HashMap::new(),
             env: Env::new(),
             narrow: HashMap::new(),

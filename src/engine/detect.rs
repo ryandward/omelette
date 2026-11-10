@@ -345,6 +345,18 @@ impl Apart<'_> {
         }) {
             return true;
         }
+        // A declared union is one of its alternatives, whatever the answer.
+        let choices = |id: Id| -> Vec<Vec<Id>> {
+            g[id].nodes.iter().filter_map(|n| match n {
+                Core::Dyn(children) | Core::DynUndef(children) if children.len() > 3 && oneof(g, children[0]) => Some(children[3..].to_vec()),
+                _ => None,
+            }).collect()
+        };
+        if choices(body).iter().any(|alternatives| alternatives.iter().all(|&a| self.distinct(z, a, false)))
+            || choices(z).iter().any(|alternatives| alternatives.iter().all(|&a| self.distinct(a, body, false)))
+        {
+            return true;
+        }
         let arms = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::If([c, y, n]) = n { Some((g.find(*c), *y, *n)) } else { None });
         let joint = arms(z).any(|(c, zy, zn)| {
             self.fixed(c) && arms(body).any(|(d, by, bn)| d == c && self.distinct(zy, by, whole) && self.distinct(zn, bn, whole))
@@ -497,4 +509,10 @@ fn mutator(g: &Graph, op: Id) -> Option<Mutator> {
         Core::Op(m) => Some(*m),
         _ => None,
     })
+}
+
+/// Whether a `dyn` node's name is `oneof`: a declared union of the alternatives after its
+/// answer.
+fn oneof(g: &Graph, name: Id) -> bool {
+    matches!(&g[name].data.constant, Some(Const::Str(s)) if *s == crate::core::Utf16::new("oneof".encode_utf16()))
 }

@@ -1,6 +1,6 @@
 //! The core IR saturated by egg: typed nodes with no operational JavaScript left in them.
 use egg::{Id, Symbol, define_language};
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Display};
 use std::str::FromStr;
 
 define_language! {
@@ -90,10 +90,13 @@ pub struct Utf16(Symbol);
 
 impl Utf16 {
     pub fn new(units: impl IntoIterator<Item = u16>) -> Self {
-        let key = units.into_iter().fold(String::from("utf16:"), |mut key, u| {
-            let _ = write!(key, "{u:04x}");
-            key
-        });
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut key = String::from("utf16:");
+        for u in units {
+            for shift in [12, 8, 4, 0] {
+                key.push(char::from(HEX[usize::from((u >> shift) & 0xf)]));
+            }
+        }
         Self(Symbol::from(key))
     }
     pub fn units(self) -> Vec<u16> {

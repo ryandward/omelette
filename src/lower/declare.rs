@@ -103,6 +103,13 @@ pub enum Form {
     Any(Shape),
 }
 
+impl Form {
+    /// Whether the form is a literal, which stands in for itself.
+    pub fn literal(&self) -> bool {
+        matches!(self, Self::Str(_) | Self::Num(_) | Self::Bool(_) | Self::Undef)
+    }
+}
+
 /// The types a program names: its aliases and interfaces, which a reference resolves to.
 pub struct Types<'t, 'a> {
     named: HashMap<&'t str, Named<'t, 'a>>,

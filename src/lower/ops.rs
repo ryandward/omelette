@@ -411,7 +411,7 @@ impl<'a> Lowerer<'a, '_> {
         }
     }
     /// An operation lowering resolved to no known value, of static type `ty`.
-    pub fn dynamic(&mut self, name: &str, args: &[&Val<'a>], ty: Ty) -> Val<'a> {
+    pub fn dynamic(&mut self, name: &'static str, args: &[&Val<'a>], ty: Ty) -> Val<'a> {
         let shape = match ty {
             Ty::Bool => Shape::BOOL,
             Ty::Str => Shape::STR,
@@ -422,13 +422,21 @@ impl<'a> Lowerer<'a, '_> {
         self.shaped(name, args, ty, shape)
     }
     /// [`Self::dynamic`], producing only values of `shape`.
-    pub fn shaped(&mut self, name: &str, args: &[&Val<'a>], ty: Ty, shape: Shape) -> Val<'a> {
+    pub fn shaped(&mut self, name: &'static str, args: &[&Val<'a>], ty: Ty, shape: Shape) -> Val<'a> {
         // A read that may be missing, held inside a list or a record, would reach an operation
         // lowering does not model unlifted: the expression's value is then unknown.
         if args.iter().any(|a| nested_read(a)) {
             self.opaque = true;
         }
-        let mut children = vec![self.b.text(Utf16::new(name.encode_utf16())), self.b.add(Core::Kinds(shape))];
+        // An operation's name is one of a few, each interned once.
+        let named = if let Some(&id) = self.names.get(name) {
+            id
+        } else {
+            let id = self.b.text(Utf16::new(name.encode_utf16()));
+            self.names.insert(name, id);
+            id
+        };
+        let mut children = vec![named, self.b.add(Core::Kinds(shape))];
         children.extend(args.iter().map(|v| self.emit(v)));
         let node = if shape.meets(Shape::UNDEF) { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
         Val::Term(self.b.add(node), ty)

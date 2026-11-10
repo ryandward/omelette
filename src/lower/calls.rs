@@ -77,7 +77,15 @@ impl<'a> Lowerer<'a, '_> {
         // A declared return type governs what the function answers.
         match f.ret {
             Some(ty) => {
-                let form = self.types.form(ty);
+                // A type's form is the same at every call.
+                let key = std::ptr::from_ref(ty) as usize;
+                let form = if let Some(form) = self.forms.get(&key) {
+                    Rc::clone(form)
+                } else {
+                    let form = Rc::new(self.types.form(ty));
+                    self.forms.insert(key, Rc::clone(&form));
+                    form
+                };
                 self.declared(out, &form)
             }
             None => out,
@@ -862,7 +870,9 @@ impl<'a> Lowerer<'a, '_> {
     /// (`and`, `or`, `not`, `if` around the index's equality) tells which index it pins, so
     /// `i === k && p`, `i === k ? p : false`, and an early `return false` decide alike.
     fn selection(&mut self, list: Seq, callback: &Val<'a>, name: &str) -> Option<Val<'a>> {
-        if !matches!(callback, Val::Fun(_)) {
+        // A callback that takes no index cannot pin one.
+        let Val::Fun(fun) = callback else { return None };
+        if fun.params.items.len() < 2 && fun.params.rest.is_none() {
             return None;
         }
         let (element, index) = (self.b.element(list.items), self.b.fresh(Kind::Index));
