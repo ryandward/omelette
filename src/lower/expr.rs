@@ -77,14 +77,15 @@ impl<'a> Lowerer<'a, '_> {
         self.clobber();
         Val::Term(self.b.unsupported(), Ty::Any)
     }
-    fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
+    pub fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
         let env = self.env.clone();
         Val::Fun(Rc::new(Fun { params, body, env }))
     }
     fn ident(&mut self, id: &IdentifierReference<'_>) -> Val<'a> {
         match self.scoping.get_reference(id.reference_id()).symbol_id() {
-            Some(symbol) => match self.env.get(&symbol).cloned() {
+            Some(symbol) => match self.env.get(&symbol).or_else(|| self.defined.get(&symbol)).cloned() {
                 Some(v) => self.settle(v),
+                None if self.ambient.contains(&symbol) => self.free(id.name.as_str()),
                 None => self.unsupported(),
             },
             None => self.free(id.name.as_str()),

@@ -10,22 +10,28 @@ use std::collections::HashMap;
 /// Record each free variable's kind: an integer where used as an index, a bound, or an
 /// arithmetic operand; a list where used as a receiver; a function where called. A name
 /// used in conflicting ways keeps no precondition.
-pub fn classify(semantic: &Semantic<'_>, kinds: &mut HashMap<String, Kind>) {
+pub fn classify(semantic: &Semantic<'_>, ambient: &[(String, oxc_semantic::SymbolId)], kinds: &mut HashMap<String, Kind>) {
     let scoping = semantic.scoping();
-    for (name, references) in scoping.root_unresolved_references() {
-        // A global lowering models is not an input.
-        if super::value::Builtin::is_global(name.as_str()) {
-            continue;
-        }
+    let mut record = |name: &str, references: &[oxc_semantic::ReferenceId]| {
         for &reference in references {
             let node = scoping.get_reference(reference).node_id();
             if let Some(kind) = role(semantic, node) {
-                let entry = kinds.entry(name.as_str().to_string()).or_insert(kind);
+                let entry = kinds.entry(name.to_string()).or_insert(kind);
                 if *entry != kind {
                     *entry = Kind::Any;
                 }
             }
         }
+    };
+    for (name, references) in scoping.root_unresolved_references() {
+        // A global lowering models is not an input.
+        if !super::value::Builtin::is_global(name.as_str()) {
+            record(name.as_str(), references);
+        }
+    }
+    // A declared variable is an input too, though the program binds it.
+    for (name, symbol) in ambient {
+        record(name, scoping.get_resolved_reference_ids(*symbol));
     }
 }
 

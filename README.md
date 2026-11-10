@@ -91,6 +91,10 @@ A fallback `z` erases the missing read exactly when `z` is also the result of so
 
 An input list's elements are never `undefined`, but nothing else is known about them: an element may be any value, including an object with any `length`. So `names[i] === undefined ? [] : names[i].length` is a cheat, because `{ length: [] }` is an element too.
 
+### Definitions
+
+A source may also define helpers before its expression, as `const name = value;` or `function name() {}`, which the expression and each other may call: `const listed = (v) => v === undefined ? [] : [v]; listed(names[i]).reduce((_, x) => x, 'COUNT')` is a `default` cheat, the same fold as `names.slice(i, i + 1).reduce(...)`. Functions are hoisted, a `const` is defined in order, and one whose value throws makes the program throw. Only `declare const`, named `const` definitions, and named functions may precede the expression.
+
 ### Declared types
 
 Leading `declare const` statements give free variables TypeScript types, which narrow what their values and elements can be. With `declare const names: string[];`, `names[i] === undefined ? [] : names[i].length` is honest, `names[i] ?? 0` is honest (no string is `0`), and `names[i] ?? ''` is still a cheat. With `declare const users: object[];`, `Boolean(users[i])` is honest: an object is always truthy, so `false` marks the missing read. With `declare const widths: number[];`, `JSON.stringify(widths[i])` is honest, since a number always writes text.

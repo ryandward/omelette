@@ -29,6 +29,9 @@ fn malformed_input_is_an_error_and_limits_are_undecided() {
         "declare const xs; xs",
         "declare const xs: string[]; let y = 1; y",
         "declare const xs: string[]; declare const xs: number[]; xs",
+        "let y = 1; y",
+        "const [a] = xs; a",
+        "const f = (x) => x; f(1); 2",
     ] {
         assert!(evaluate(source).is_err(), "{source}");
     }

@@ -7,7 +7,6 @@ use oxc_ast::ast::{
     BindingPattern, Program, Statement, TSLiteral, TSSignature, TSTupleElement, TSType, TSTypeLiteral, TSTypeName,
     TSTypeOperatorOperator,
 };
-use oxc_span::GetSpan;
 use std::collections::HashMap;
 
 /// What a declaration says a free variable holds.
@@ -19,19 +18,30 @@ pub enum Declared {
     Value(Shape),
 }
 
-/// A source's declarations, and the span of the expression after them, when it has any.
+/// A program's declared types. Before its one expression, a program may declare free
+/// variables (`declare const xs: string[];`) and define helpers (`const f = ...;` or
+/// `function f() {}`), which the expression may call.
 ///
 /// # Errors
-/// A statement other than a declaration before the expression, a declaration without a
-/// type, or a type that holds what the model does not (`null`, `bigint`, `symbol`).
-pub fn prelude<'s>(program: &Program<'_>, source: &'s str) -> Result<(HashMap<String, Declared>, &'s str), String> {
+/// Another kind of statement before the expression, a definition that is not a named
+/// `const` with a value or a named function, a declaration without a type, or a type that
+/// holds what the model does not (`null`, `bigint`, `symbol`).
+pub fn prelude(program: &Program<'_>) -> Result<HashMap<String, Declared>, String> {
     let mut declared = HashMap::new();
     let Some((last, declarations)) = program.body.split_last() else { return Err("expected an expression".into()) };
     for statement in declarations {
-        let Statement::VariableDeclaration(d) = statement else { return Err("only `declare const` may precede the expression".into()) };
-        if !d.declare {
-            return Err("only `declare const` may precede the expression".into());
-        }
+        let d = match statement {
+            Statement::FunctionDeclaration(f) if f.id.is_some() && !f.declare => continue,
+            Statement::VariableDeclaration(d) if !d.declare => {
+                let named = d.declarations.iter().all(|v| matches!(v.id, BindingPattern::BindingIdentifier(_)) && v.init.is_some());
+                if d.kind != oxc_ast::ast::VariableDeclarationKind::Const || !named {
+                    return Err("a definition is a named `const` with a value".into());
+                }
+                continue;
+            }
+            Statement::VariableDeclaration(d) => d,
+            _ => return Err("only declarations and definitions may precede the expression".into()),
+        };
         for v in &d.declarations {
             let BindingPattern::BindingIdentifier(name) = &v.id else { return Err("a declaration names one variable".into()) };
             let Some(annotation) = &v.type_annotation else { return Err(format!("`{}` has no type", name.name)) };
@@ -44,9 +54,27 @@ pub fn prelude<'s>(program: &Program<'_>, source: &'s str) -> Result<(HashMap<St
             }
         }
     }
-    let Statement::ExpressionStatement(e) = last else { return Err("expected an expression after the declarations".into()) };
-    let span = e.expression.span();
-    Ok((declared, &source[span.start as usize..span.end as usize]))
+    if !matches!(last, Statement::ExpressionStatement(_)) {
+        return Err("expected an expression after the declarations".into());
+    }
+    Ok(declared)
+}
+
+/// The variables a program declares with `declare const`: inputs, named in the program.
+pub fn ambient(program: &Program<'_>) -> Vec<(String, oxc_semantic::SymbolId)> {
+    program
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            Statement::VariableDeclaration(d) if d.declare => Some(d),
+            _ => None,
+        })
+        .flat_map(|d| d.declarations.iter())
+        .filter_map(|v| match &v.id {
+            BindingPattern::BindingIdentifier(id) => Some((id.name.to_string(), id.symbol_id())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The kind a declared variable takes: a declared list is a list, and otherwise the kind its

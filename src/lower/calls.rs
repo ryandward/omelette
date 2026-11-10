@@ -128,6 +128,39 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// Run statements to the first return; falling off the end returns undefined. A branch
     /// that does not return continues with the statements after it.
+    /// A program: its declarations, its definitions in order, and then the value of its
+    /// expression. Functions are defined before anything runs, as JavaScript hoists them; a
+    /// `const` is defined once its value is, so one that throws makes the program throw.
+    pub fn module(&mut self, body: &'a [Statement<'a>]) -> Val<'a> {
+        for statement in body {
+            if let Statement::FunctionDeclaration(f) = statement
+                && let Some(id) = &f.id
+                && let Some(block) = &f.body
+            {
+                let helper = self.closure(&f.params, Body::Block(block));
+                self.defined.insert(id.symbol_id(), helper);
+            }
+        }
+        self.define(body)
+    }
+    fn define(&mut self, body: &'a [Statement<'a>]) -> Val<'a> {
+        match body {
+            [Statement::ExpressionStatement(e)] => self.expr(&e.expression),
+            [Statement::VariableDeclaration(d), rest @ ..] if !d.declare => self.define_consts(&d.declarations, rest),
+            [_, rest @ ..] => self.define(rest),
+            [] => self.unsupported(),
+        }
+    }
+    fn define_consts(&mut self, declarators: &'a [oxc_ast::ast::VariableDeclarator<'a>], rest: &'a [Statement<'a>]) -> Val<'a> {
+        let Some((first, others)) = declarators.split_first() else { return self.define(rest) };
+        let (BindingPattern::BindingIdentifier(id), Some(init)) = (&first.id, &first.init) else { return self.unsupported() };
+        let value = self.expr(init);
+        self.strict(vec![value], &mut |l, mut value| {
+            let value = l.own(value.remove(0));
+            l.defined.insert(id.symbol_id(), value);
+            l.define_consts(others, rest)
+        })
+    }
     pub fn run(&mut self, stmts: &[&'a Statement<'a>]) -> Val<'a> {
         let Some((&first, rest)) = stmts.split_first() else { return Val::Undef };
         match first {

@@ -16,7 +16,7 @@ use crate::core::{Core, Kind};
 use build::Builder;
 use egg::{Id, RecExpr};
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, Program, Statement};
+use oxc_ast::ast::{Program, Statement};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::SourceType;
@@ -53,29 +53,26 @@ pub fn lower(source: &str) -> Result<Lowered, String> {
 /// A syntax error, or a source that is not a single expression.
 pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
     let arena = Allocator::default();
+    // A source with a prelude is a program; any other is one expression, parenthesized so an
+    // object literal is not a block.
+    let texts: Vec<String> = sources.iter().map(|s| if has_prelude(s) { (*s).to_string() } else { format!("(\n{s}\n);") }).collect();
+    let programs = texts.iter().map(|s| parse(&arena, s)).collect::<Result<Vec<_>, _>>()?;
     let mut declared: HashMap<String, Declared> = HashMap::new();
-    let mut expressions = Vec::with_capacity(sources.len());
-    for &source in sources {
-        let (types, expression) = split_prelude(&arena, source)?;
-        for (name, ty) in types {
+    for program in &programs {
+        for (name, ty) in declare::prelude(program)? {
             if declared.insert(name.clone(), ty).is_some_and(|old| old != ty) {
                 return Err(format!("`{name}` is declared twice"));
             }
         }
-        expressions.push(expression);
     }
-    let wrapped: Vec<String> = expressions.iter().map(|s| format!("(\n{s}\n);")).collect();
-    let programs = wrapped
-        .iter()
-        .map(|s| parse(&arena, s))
-        .collect::<Result<Vec<_>, _>>()?;
     let semantics: Vec<_> = programs
         .iter()
         .map(|p| SemanticBuilder::new().with_build_nodes(true).build(p).semantic)
         .collect();
+    let ambient: Vec<_> = programs.iter().map(|p| declare::ambient(p)).collect();
     let mut kinds = HashMap::new();
-    for semantic in &semantics {
-        usage::classify(semantic, &mut kinds);
+    for (semantic, ambient) in semantics.iter().zip(&ambient) {
+        usage::classify(semantic, ambient, &mut kinds);
     }
     for (name, ty) in &declared {
         kinds.insert(name.clone(), declare::kind(*ty, kinds.get(name).copied()));
@@ -83,9 +80,11 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
     Ok(programs
         .iter()
         .zip(&semantics)
-        .map(|(program, semantic)| {
+        .zip(&ambient)
+        .map(|((program, semantic), ambient)| {
             let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, &declared);
-            let value = lowerer.expr(expression(program));
+            lowerer.ambient = ambient.iter().map(|(_, symbol)| *symbol).collect();
+            let value = lowerer.module(&program.body);
             let root = lowerer.emit(&value);
             let log = lowerer.state.log.clone();
             let effects = match &log {
@@ -100,17 +99,11 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .collect())
 }
 
-/// A source's declarations and its expression. Only a source that starts with `declare`
-/// has declarations; any other is all expression.
-fn split_prelude<'s>(arena: &Allocator, source: &'s str) -> Result<(HashMap<String, Declared>, &'s str), String> {
-    if !source.trim_start().starts_with("declare") {
-        return Ok((HashMap::new(), source));
-    }
-    let parsed = Parser::new(arena, source, SourceType::ts()).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Err(format!("{:?}", parsed.diagnostics));
-    }
-    declare::prelude(&parsed.program, source)
+/// Whether a source starts with a prelude: declarations or definitions before its
+/// expression.
+fn has_prelude(source: &str) -> bool {
+    let first = source.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
+    matches!(first, "declare" | "const" | "function" | "let" | "var")
 }
 
 fn parse<'a>(arena: &'a Allocator, source: &'a str) -> Result<Program<'a>, String> {
@@ -120,16 +113,9 @@ fn parse<'a>(arena: &'a Allocator, source: &'a str) -> Result<Program<'a>, Strin
     }
     let program = parsed.program;
     match program.body.as_slice() {
-        [Statement::ExpressionStatement(_)] => Ok(program),
+        [.., Statement::ExpressionStatement(_)] => Ok(program),
         _ => Err("expected a single expression".into()),
     }
-}
-
-fn expression<'p, 'a>(program: &'p Program<'a>) -> &'p Expression<'a> {
-    let Statement::ExpressionStatement(s) = &program.body[0] else {
-        unreachable!("parse admits only one expression statement")
-    };
-    &s.expression
 }
 
 /// The partial evaluator's state while lowering one expression.
@@ -139,6 +125,10 @@ pub struct Lowerer<'a, 'l> {
     kinds: &'l HashMap<String, Kind>,
     /// What declarations say the free variables hold.
     declared: &'l HashMap<String, Declared>,
+    /// The variables `declare const` names: inputs, though the program binds them.
+    ambient: std::collections::HashSet<oxc_semantic::SymbolId>,
+    /// The helpers the program defines before its expression, which any code may call.
+    defined: HashMap<oxc_semantic::SymbolId, Val<'a>>,
     env: Env<'a>,
     /// Reads whose presence a branch has decided: absent, or the element.
     narrow: HashMap<Id, Val<'a>>,
@@ -188,6 +178,8 @@ impl<'l> Lowerer<'_, 'l> {
             scoping,
             kinds,
             declared,
+            ambient: std::collections::HashSet::new(),
+            defined: HashMap::new(),
             env: Env::new(),
             narrow: HashMap::new(),
             elems: HashMap::new(),
