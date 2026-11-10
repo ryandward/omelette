@@ -165,21 +165,23 @@ The verdicts concern this model, not general JavaScript safety.
 
 ## Latency
 
-[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 137 cases, the 73 absence cases and then the 64 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
+[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 200 cases, the 134 absence cases and then the 66 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 4.9 us |
-| Worst per-case parser + semantic analysis + lowering p95 | 32.6 us |
-| Worst per-case total p95 / p99 | 368.3 / 561.1 us |
-| Largest total among 68,500 samples | 676.9 us |
-| Worst total p95: original / string / every / some cases | 368.3 / 274.4 / 135.7 / 144.6 us |
-| Worst total p95: unknown-callback / join and flat cases | 46.5 / 117.2 us |
-| Worst total p95: mutation cases | 255.0 us |
-| Two-element slice sum total p50 / p95 | 43.6 / 49.0 us |
+| Worst per-case parser p95 | 5.4 us |
+| Worst per-case parser + semantic analysis + lowering p95 | 47.3 us |
+| Worst per-case total p95 / p99 | 395.5 / 643.6 us |
+| Largest total among 100,000 samples | 783.5 us |
+| Worst total p95: original / string / every / some cases | 395.5 / 309.1 / 175.6 / 174.5 us |
+| Worst total p95: unknown-callback / join and flat cases | 53.0 / 152.8 us |
+| Worst total p95: image-test and conversion / declared-type / catch, fold, and forEach cases | 285.6 / 118.8 / 163.5 us |
+| Worst total p95: pinned-walker, filtered-slot, and definition cases | 157.3 us |
+| Worst total p95: mutation cases | 266.2 us |
+| Two-element slice sum total p50 / p95 | 42.1 / 60.1 us |
 | All-case graph sizes / iterations | 1-76 / 1-8 |
-| One-time runtime initialization | 830.6 us |
-| First evaluation after initialization | 187.9 us |
+| One-time runtime initialization | 878.1 us |
+| First evaluation after initialization | 154.5 us |
 
 The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
 
