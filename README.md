@@ -4,7 +4,7 @@ An in-process Rust probe for absence laundering in JavaScript/TypeScript express
 
 It also reports observable mutation: whether the expression changes, in place, an array or object the caller holds. `xs.sort()` and `groups[i].push(x)` do. `[...xs].sort()` and `(() => { const a = []; a.push(x); return a; })()` mutate only an array they built themselves, which nobody else can see.
 
-The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 121 absence cases in [tests/cases.txt](tests/cases.txt) and the 66 mutation cases in [tests/mutations.txt](tests/mutations.txt) reach saturation with their expected verdicts. [tests/soundness.rs](tests/soundness.rs) and [tests/mutation.rs](tests/mutation.rs) hold the regressions from the soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
+The runtime is [`egg`](https://github.com/egraphs-good/egg) with `oxc_parser` and `oxc_semantic`, all in-process. The 154 absence cases in [tests/cases.txt](tests/cases.txt) and the 66 mutation cases in [tests/mutations.txt](tests/mutations.txt) reach saturation with their expected verdicts. [tests/soundness.rs](tests/soundness.rs) and [tests/mutation.rs](tests/mutation.rs) hold the regressions from the soundness hunts. [docs/architecture.md](docs/architecture.md) describes the pipeline.
 
 ## Run and embed
 
@@ -169,23 +169,24 @@ The verdicts concern this model, not general JavaScript safety.
 
 ## Latency
 
-[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 200 cases, the 134 absence cases and then the 66 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
+[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 220 cases, the 154 absence cases and then the 66 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 5.4 us |
-| Worst per-case parser + semantic analysis + lowering p95 | 47.3 us |
-| Worst per-case total p95 / p99 | 395.5 / 643.6 us |
-| Largest total among 100,000 samples | 783.5 us |
-| Worst total p95: original / string / every / some cases | 395.5 / 309.1 / 175.6 / 174.5 us |
-| Worst total p95: unknown-callback / join and flat cases | 53.0 / 152.8 us |
-| Worst total p95: image-test and conversion / declared-type / catch, fold, and forEach cases | 285.6 / 118.8 / 163.5 us |
-| Worst total p95: pinned-walker, filtered-slot, and definition cases | 157.3 us |
-| Worst total p95: mutation cases | 266.2 us |
-| Two-element slice sum total p50 / p95 | 42.1 / 60.1 us |
+| Worst per-case parser p95 | 4.5 us |
+| Worst per-case parser + semantic analysis + lowering p95 | 44.8 us |
+| Worst per-case total p95 / p99 | 379.5 / 657.4 us |
+| Largest total among 110,000 samples | 724.3 us |
+| Worst total p95: original / string / every / some cases | 379.5 / 280.7 / 134.1 / 149.0 us |
+| Worst total p95: unknown-callback / join and flat cases | 39.6 / 114.5 us |
+| Worst total p95: image-test and conversion / declared-type / catch, fold, and forEach cases | 255.7 / 108.8 / 143.8 us |
+| Worst total p95: pinned-walker, filtered-slot, and definition cases | 134.4 us |
+| Worst total p95: L's corpus of GenomeHub's shapes | 172.8 us |
+| Worst total p95: mutation cases | 247.6 us |
+| Two-element slice sum total p50 / p95 | 42.4 / 47.1 us |
 | All-case graph sizes / iterations | 1-76 / 1-8 |
-| One-time runtime initialization | 878.1 us |
-| First evaluation after initialization | 154.5 us |
+| One-time runtime initialization | 883.5 us |
+| First evaluation after initialization | 146.9 us |
 
 The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
 
