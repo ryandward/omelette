@@ -46,7 +46,7 @@ Checked in this order:
 2. `CHEAT` if a witness or an escape shows a swallowed read. The families are reported. A witness counts when the root has no representative that avoids its class, its read is not proven in or out of range, and all of these hold:
    - its family swallows;
    - some witness of that class over that read has a replacement that is certainly a value, with no throw in it;
-   - every representative of its present branch mentions the element, and some representative is free of unknown functions, unknown values, and unsupported syntax;
+   - some representative of its present branch is free of unknown functions, unknown values, and unsupported syntax, and none avoids the element only by reading the same list another way;
    - its replacement is not apart from its present branch (see the image test below);
    - the element it reads cannot itself be `undefined`.
 
