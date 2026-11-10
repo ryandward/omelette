@@ -283,7 +283,15 @@ impl<'a> Lowerer<'a, '_> {
             "slice" => slice_items(items, args.first(), args.get(1)).unwrap_or_else(|| self.unsupported()),
             "at" => self.at_items(items, &f),
             "every" | "some" => self.quantify(items, &f, name == "every", 0),
-            "reduce" => self.fold_items(items, &f, args.get(1).cloned()),
+            "reduce" | "reduceRight" => self.fold_items(items, &f, args.get(1).cloned(), name == "reduceRight"),
+            "includes" if args.get(1).is_none_or(|from| matches!(from, Val::Undef)) => {
+                let sought = args.first().cloned().unwrap_or(Val::Undef);
+                items.iter().fold(Val::Bool(false), |found, item| {
+                    let item = self.settle(item.clone());
+                    let here = self.same_value_zero(item, &sought);
+                    self.branch(found, Arm::Val(&Val::Bool(true)), Arm::Val(&here))
+                })
+            }
             "join" => {
                 // The receiver is being written too, so an element that is the receiver is empty.
                 let receiver = match self.this {
@@ -360,9 +368,11 @@ impl<'a> Lowerer<'a, '_> {
     fn truthy_split(&mut self, v: Val<'a>) -> Val<'a> {
         self.lift(v, Family::Sink, &mut |l, v| l.truthy(v))
     }
-    fn fold_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+    /// `reduce` over a literal list, or with `right`, `reduceRight`, which starts at the end.
+    fn fold_items(&mut self, items: &Rc<Vec<Val<'a>>>, f: &Val<'a>, init: Option<Val<'a>>, right: bool) -> Val<'a> {
         let list = self.this_or(Val::List(items.clone()));
-        let mut ks = 0..items.len();
+        let order: Vec<usize> = if right { (0..items.len()).rev().collect() } else { (0..items.len()).collect() };
+        let mut ks = order.into_iter();
         let mut acc = init;
         while acc.is_none() {
             let Some(k) = ks.next() else { return Val::Throw };
@@ -451,6 +461,10 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                     l.truthy_split(v)
                 })
             }
+            "includes" if args.get(1).is_none_or(|from| matches!(from, Val::Undef)) => {
+                let sought = args.first().cloned().unwrap_or(Val::Undef);
+                self.over_slot(s, Family::Unit, &Val::Bool(false), &mut |l, x| l.same_value_zero(x, &sought))
+            }
             // The element where the callback holds for it, and otherwise nothing.
             "find" => self.over_slot(s, Family::Propagate, &Val::Undef, &mut |l, x| {
                 let array = l.this_or(Val::Short(s.clone()));
@@ -458,7 +472,8 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 let holds = l.truthy_split(v);
                 l.branch(holds, Arm::Val(&x), Arm::Val(&Val::Undef))
             }),
-            "reduce" => {
+            // One element is folded the same from either end.
+            "reduce" | "reduceRight" => {
                 let init = args.get(1).cloned();
                 let unit = init.clone().unwrap_or(Val::Throw);
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| match &init {
@@ -578,6 +593,7 @@ impl<'a> Lowerer<'a, '_> {
             "filter" => self.filter(list, &f),
             "find" => self.find(list, &f),
             "reduce" => self.reduce(list, &f, args.get(1).cloned()),
+            "includes" if args.get(1).is_none_or(|from| matches!(from, Val::Undef)) => self.includes(list, &f),
             "join" => {
                 let sep = self.separator(args.first().cloned());
                 let sep = self.emit(&sep);
@@ -809,6 +825,18 @@ impl<'a> Lowerer<'a, '_> {
         let end = pinned.plus(&Form::constant(1), 1)?;
         let Val::Short(slot) = self.slice(list, Some(Val::Num(pinned.clone())), Some(Val::Num(end))) else { return None };
         Some(self.short_method_at(&slot, name, std::slice::from_ref(callback), Some(&pinned)))
+    }
+    /// `list.includes(sought)` over a symbolic list: whether some element is `sought` by
+    /// `SameValueZero`.
+    fn includes(&mut self, list: Seq, sought: &Val<'a>) -> Val<'a> {
+        let (element, index) = (self.b.element(list.items), self.b.fresh(Kind::Index));
+        self.coords.insert(index, list.id);
+        self.members.insert(element, list.id);
+        let here = self.same_value_zero(Val::Term(element, list.items.ty()), sought);
+        let here = self.truthy_split(here);
+        let body = self.emit(&here);
+        let lam = self.b.add(Core::Lam(vec![element, index, body].into()));
+        Val::Term(self.b.add(Core::Some([lam, list.id])), Ty::Bool)
     }
     /// The index `j` when the callback is `(_, idx) => idx === j` (either side) with `j` an
     /// integer that mentions neither parameter: the filter keeps at most `list[j]`. Also the

@@ -134,3 +134,5 @@ CHEAT	names.filter((n, i) => i === k && n !== '').length
 CHEAT	names.slice(i, i + 1).filter((n) => n !== '')
 no cheat	names.slice(i, i + 1).filter((n) => n !== undefined)
 UNDECIDED	names.some((n, i) => i === k && f(n))
+CHEAT	names.slice(i, i + 1).includes('admin')
+CHEAT	widths.slice(i, i + 1).reduceRight((_, w) => w, 0)

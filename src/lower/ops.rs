@@ -258,6 +258,20 @@ impl<'a> Lowerer<'a, '_> {
 }
 
 impl<'a> Lowerer<'a, '_> {
+    /// `SameValueZero`, as `includes` compares: strict equality, except that `NaN` is itself.
+    /// Where either side cannot be `NaN`, that is strict equality.
+    pub fn same_value_zero(&mut self, a: Val<'a>, b: &Val<'a>) -> Val<'a> {
+        self.lift2(a, b.clone(), Family::Sink, &mut |l, a, b| {
+            let may_be_nan = |l: &Self, v: &Val<'a>| !matches!(v, Val::Num(_)) && l.shape(v).meets(Shape::NUM);
+            if !may_be_nan(l, &a) || !may_be_nan(l, &b) {
+                return l.binary(Bin::Eq, a, b);
+            }
+            match (&a, &b) {
+                (Val::NaN, Val::NaN) => Val::Bool(true),
+                _ => l.dynamic("same", &[&a, &b], Ty::Bool),
+            }
+        })
+    }
     pub fn strict_eq(&mut self, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         if let Some(known) = same(a, b).or_else(|| identical_object(a, b)) {
             return Val::Bool(known);
