@@ -723,12 +723,32 @@ impl<'a> Lowerer<'a, '_> {
         self.coords.insert(walk.i, list.id);
         self.members.insert(walk.x, list.id);
         let base = self.state.clone();
-        let (written, opaque) = self.speculate(|l| {
+        // The probe sees each array the expression holds as a list of its type, as any run
+        // after the first would: what it writes is then what any run may write, and the
+        // type it leaves is the first round of the contents' type.
+        let (written, opaque, after) = self.speculate(|l| {
+            let held: Vec<(RefKey, Val<'a>)> =
+                base.cells.iter().filter(|(k, _)| matches!(k, RefKey::Local(_))).map(|(k, v)| (*k, v.clone())).collect();
+            for (key, contents) in held {
+                if let Some(Ty::List(items)) = l.static_type(contents) {
+                    let acc = l.b.fresh_shaped(Kind::Acc, Shape::LIST);
+                    l.write(key, Val::Term(acc, Ty::List(items)));
+                }
+            }
+            let start = l.state.clone();
             l.run_on(&walk);
-            (l.written_since(&base), l.opaque)
+            let written = l.written_since(&start);
+            let after = match written.as_slice() {
+                [key] => {
+                    let contents = l.deref(Val::Ref(*key));
+                    l.static_type(contents)
+                }
+                _ => None,
+            };
+            (written, l.opaque, after)
         });
         let done = match written.as_slice() {
-            [key @ RefKey::Local(_)] if !opaque && base.cells.contains_key(key) => self.fold_store(*key, &walk),
+            [key @ RefKey::Local(_)] if !opaque && base.cells.contains_key(key) => self.fold_store(*key, &walk, after),
             _ => self.repeat(list.id, 1, |l| l.run_on(&walk)),
         };
         if self.may_raise(&done) {
@@ -746,26 +766,27 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// An array whose contents every run of the callback updates: they fold over the list.
     /// Their type is found as an accumulator's is.
-    fn fold_store(&mut self, key: RefKey, walk: &Each<'a>) -> Val<'a> {
+    /// `first` is the contents' type after a run on contents of their type before, which the
+    /// probe found.
+    fn fold_store(&mut self, key: RefKey, walk: &Each<'a>, first: Option<Ty>) -> Val<'a> {
         let before = self.deref(Val::Ref(key));
-        let mut items = match self.static_type(before.clone()) {
-            Some(Ty::List(items)) => Some(items),
-            _ => None,
+        let Some(Ty::List(mut now)) = self.static_type(before.clone()) else {
+            return self.repeat(walk.list.id, 1, |l| l.run_on(walk));
         };
+        let mut next = first;
         for _ in 0..3 {
-            let Some(now) = items else { break };
+            match super::expr::combine(Some(Ty::List(now)), next) {
+                Some(Ty::List(grown)) if grown == now => return self.fold_into(key, &before, now, walk),
+                Some(Ty::List(grown)) => now = grown,
+                _ => break,
+            }
             let acc = self.b.fresh_shaped(Kind::Acc, Shape::LIST);
-            let next = self.speculate(|l| {
+            next = self.speculate(|l| {
                 l.write(key, Val::Term(acc, Ty::List(now)));
                 l.run_on(walk);
                 let contents = l.deref(Val::Ref(key));
                 l.static_type(contents)
             });
-            items = match super::expr::combine(Some(Ty::List(now)), next) {
-                Some(Ty::List(next)) if next == now => return self.fold_into(key, &before, now, walk),
-                Some(Ty::List(next)) => Some(next),
-                _ => None,
-            };
         }
         self.repeat(walk.list.id, 1, |l| l.run_on(walk))
     }
