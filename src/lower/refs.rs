@@ -139,6 +139,10 @@ impl<'a> Lowerer<'a, '_> {
     /// The term for a value, every reference in it replaced by its current contents. An
     /// array that contains itself has no finite term.
     pub fn emit(&mut self, v: &Val<'a>) -> Id {
+        if filtered(v) {
+            let v = self.slots(v.clone());
+            return self.emit(&v);
+        }
         if !holds_ref(v) {
             return self.b.emit(v);
         }
@@ -148,6 +152,22 @@ impl<'a> Lowerer<'a, '_> {
             self.resolved.clear();
         }
         self.b.emit(&resolved)
+    }
+    /// A value with every short list that a filter may empty written as its slot: empty where
+    /// its read is missing, and where present, the element or nothing as the filter decides.
+    /// A filter that drops a present element makes the same empty list as a missing read.
+    fn slots(&mut self, v: Val<'a>) -> Val<'a> {
+        match v {
+            Val::Short(s) if !matches!(s.keep, Val::Bool(true)) => {
+                self.over_slot(&s, Family::Container, &Val::empty(), &mut |_, e| Val::List(Rc::new(vec![e])))
+            }
+            Val::List(items) if items.iter().any(filtered) => Val::List(Rc::new(items.iter().map(|v| self.slots(v.clone())).collect())),
+            Val::Split(s) if filtered(&s.absent) || filtered(&s.present) => {
+                let (absent, present) = (self.slots(s.absent.clone()), self.slots(s.present.clone()));
+                Val::Split(Rc::new(Split { absent, present, ..(*s).clone() }))
+            }
+            v => v,
+        }
     }
     /// A value with every reference replaced by its contents. The arrays being resolved are
     /// one stack across nested emissions (a choice's contents emit its alternatives), so a
@@ -443,6 +463,15 @@ impl<'a> Lowerer<'a, '_> {
         self.state.epoch += 1;
     }
     /// Contents lowering no longer knows.
+    /// Whether lowering since the store `before` (and opacity `opaque`) had an effect outside
+    /// what it lowered: a write to an array that outlives it, a logged mutation, an escape,
+    /// or something lowering does not model. A new array is no such effect.
+    pub fn effects_since(&self, before: &State<'a>, opaque: bool) -> bool {
+        !self.written_since(before).is_empty()
+            || !self.state.log.identical(&before.log)
+            || !Rc::ptr_eq(&self.state.escaped, &before.escaped)
+            || self.opaque != opaque
+    }
     /// The arrays that outlive a callback and that it wrote, from the store before it.
     pub fn written_since(&self, base: &State<'a>) -> Vec<RefKey> {
         let outlive = |k: &RefKey| base.cells.contains_key(k) || matches!(k, RefKey::Input(_));
@@ -587,6 +616,16 @@ pub fn holds_ref(v: &Val<'_>) -> bool {
         Val::Ref(_) => true,
         Val::List(items) => items.iter().any(holds_ref),
         Val::Split(s) => holds_ref(&s.absent) || holds_ref(&s.present),
+        _ => false,
+    }
+}
+
+/// Whether a value holds a short list a filter may empty.
+fn filtered(v: &Val<'_>) -> bool {
+    match v {
+        Val::Short(s) => !matches!(s.keep, Val::Bool(true)),
+        Val::List(items) => items.iter().any(filtered),
+        Val::Split(s) => filtered(&s.absent) || filtered(&s.present),
         _ => false,
     }
 }

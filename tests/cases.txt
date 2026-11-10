@@ -126,3 +126,11 @@ no cheat	(() => { const out = []; users.forEach((_, k) => { if (roles[k] !== und
 CHEAT	(() => { const out = []; users.forEach((_, k) => { out.push(roles[k] ?? 'none'); }); return out; })()
 CHEAT	(() => { const out = []; users.forEach((_, k) => { out.push(roles[k]); }); return out; })()
 UNDECIDED	(() => { const out = []; users.map((_, k) => out.push(roles[k] ?? 0)); return out; })()
+CHEAT	names.some((n, i) => i === k && n === 'admin')
+CHEAT	names.some((n, i) => { if (i !== k) return false; return n === 'admin'; })
+CHEAT	names.every((n, i) => i !== k || n !== 'off')
+no cheat	names.some((n, i) => i === k)
+CHEAT	names.filter((n, i) => i === k && n !== '').length
+CHEAT	names.slice(i, i + 1).filter((n) => n !== '')
+no cheat	names.slice(i, i + 1).filter((n) => n !== undefined)
+UNDECIDED	names.some((n, i) => i === k && f(n))

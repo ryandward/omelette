@@ -117,6 +117,120 @@ impl Builder {
         }
         false
     }
+    /// The indices a truth term pins the walker index `index` to: each form `k` such that the
+    /// term being `when` forces `index = k`. `None` when the term is never `when`.
+    /// Conjunctions pin to what either part pins; alternatives, to what every live alternative
+    /// pins.
+    pub fn pins(&self, id: Id, index: Id, when: bool) -> Option<Vec<Form>> {
+        if let Some(k) = self.equality(id, index) {
+            return Some(if when { vec![k] } else { Vec::new() });
+        }
+        match &self.out[id] {
+            Core::Dyn(children) if self.named(children, "truthy") => match children.get(2) {
+                Some(&value) => self.truthy_pins(value, index, when),
+                None => Some(Vec::new()),
+            },
+            Core::True => when.then(Vec::new),
+            Core::False => (!when).then(Vec::new),
+            Core::Not(inner) => self.pins(*inner, index, !when),
+            Core::And([left, right]) if when => both(self.pins(*left, index, true), self.pins(*right, index, true)),
+            Core::And([left, right]) => either(self.pins(*left, index, false), self.pins(*right, index, false)),
+            Core::Or([left, right]) if when => either(self.pins(*left, index, true), self.pins(*right, index, true)),
+            Core::Or([left, right]) => both(self.pins(*left, index, false), self.pins(*right, index, false)),
+            Core::If(parts) => self.choice_pins(*parts, index, when, &|arm| self.pins(arm, index, when)),
+            _ => Some(Vec::new()),
+        }
+    }
+    /// [`Self::pins`] for the truthiness of a value: a boolean is its own truth, and a
+    /// conditional's truth is its arms'. Any other value's truth is unknown, so it pins
+    /// nothing.
+    fn truthy_pins(&self, id: Id, index: Id, when: bool) -> Option<Vec<Form>> {
+        use crate::core::Known;
+        if self.shape(id).within(Shape::BOOL) {
+            return self.pins(id, index, when);
+        }
+        match self.out[id] {
+            Core::If(parts) => self.choice_pins(parts, index, when, &|arm| self.truthy_pins(arm, index, when)),
+            _ => Some(Vec::new()),
+        }
+    }
+    /// What `if test yes no` being `when` pins, given what each arm being `when` pins: the
+    /// arm taken where the test holds, or where it fails, must pin. An arm whose truth is the
+    /// test's is the test's value there.
+    fn choice_pins(&self, [test, yes, no]: [Id; 3], index: Id, when: bool, arm: &dyn Fn(Id) -> Option<Vec<Form>>) -> Option<Vec<Form>> {
+        // The test itself, or the value the test is the truthiness of (`n && p` returns `n`
+        // where `n` is falsy), has the test's truth.
+        let tested = match &self.out[test] {
+            Core::Dyn(children) if self.named(children, "truthy") => children.get(2).copied(),
+            _ => None,
+        };
+        let taken = |holds: bool, chosen: Id| {
+            if chosen == test || tested == Some(chosen) {
+                return (holds == when).then(|| self.pins(test, index, holds)).flatten();
+            }
+            both(self.pins(test, index, holds), arm(chosen))
+        };
+        either(taken(true, yes), taken(false, no))
+    }
+    /// Whether a `dyn` node's name is `name`.
+    fn named(&self, children: &[Id], name: &str) -> bool {
+        children.first().is_some_and(|&n| matches!(self.out[n], Core::Str(s) if s == Utf16::new(name.encode_utf16())))
+    }
+    /// `i === k` as lowering writes an integer equality, `0 <= i - k` and `0 <= k - i`: `k`.
+    fn equality(&self, id: Id, i: Id) -> Option<Form> {
+        let Core::And([a, b]) = self.out[id] else { return None };
+        let side = |id: Id| match self.out[id] {
+            Core::Le([zero, sum]) if matches!(self.out[zero], Core::Int(0)) => Some(self.form_of(sum)),
+            _ => None,
+        };
+        let (up, down) = (side(a)?, side(b)?);
+        if up.plus(&down, 1)? != Form::constant(0) {
+            return None;
+        }
+        let c = *up.terms.get(&i)?;
+        if c.abs() != 1 {
+            return None;
+        }
+        // up = c * i + rest, so i = k where k = -c * rest.
+        let rest = up.plus(&Form::atom(i).scale(c)?, -1)?;
+        rest.scale(-c)
+    }
+    /// The affine form a term spells.
+    fn form_of(&self, id: Id) -> Form {
+        match &self.out[id] {
+            Core::Int(n) => Form::constant(*n),
+            Core::Lin(children) => {
+                let int = |id: &Id| if let Core::Int(n) = self.out[*id] { n } else { 0 };
+                let mut form = Form::constant(children.first().map_or(0, int));
+                for pair in children[1..].chunks(2) {
+                    if let [c, atom] = pair
+                        && let Some(next) = form.plus(&Form::atom(*atom).scale(int(c)).unwrap_or_default(), 1)
+                    {
+                        form = next;
+                    }
+                }
+                form
+            }
+            _ => Form::atom(id),
+        }
+    }
+    /// Whether a form mentions a variable a walker or a fold binds, which means nothing
+    /// outside it.
+    pub fn binds(&self, form: &Form) -> bool {
+        form.terms.keys().any(|&atom| {
+            let (mut seen, mut stack) = (std::collections::HashSet::new(), vec![atom]);
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                match &self.out[id] {
+                    Core::Var(v) if matches!(v.kind, Kind::Elem | Kind::Item | Kind::Index | Kind::Acc) => return true,
+                    n => stack.extend(n.children()),
+                }
+            }
+            false
+        })
+    }
     /// Whether the term `id` mentions the term `var`.
     pub fn mentions(&self, id: Id, var: Id) -> bool {
         id == var || self.out[id].children().iter().any(|&c| self.mentions(c, var))
@@ -183,5 +297,18 @@ impl Builder {
     }
     pub fn text(&mut self, s: Utf16) -> Id {
         self.add(Core::Str(s))
+    }
+}
+
+/// Pins that hold when both terms hold: either's. A term that never holds makes both never hold.
+fn both(left: Option<Vec<Form>>, right: Option<Vec<Form>>) -> Option<Vec<Form>> {
+    Some(left?.into_iter().chain(right?).collect())
+}
+
+/// Pins that hold when either term does: each live one's, so only the forms they share.
+fn either(left: Option<Vec<Form>>, right: Option<Vec<Form>>) -> Option<Vec<Form>> {
+    match (left, right) {
+        (None, other) | (other, None) => other,
+        (Some(left), Some(right)) => Some(left.into_iter().filter(|k| right.contains(k)).collect()),
     }
 }

@@ -64,8 +64,8 @@ Checked in this order:
 | Family | The missing read becomes | Examples |
 | --- | --- | --- |
 | `default` | a value the program wrote | `xs[i] ?? 0`, `xs[i] === undefined ? 0 : xs[i]`, `xs.length ? xs[xs.length - 1] : 0`, `[...a, 0][0]` |
-| `unit` | the unit of a fold's monoid | `xs.slice(i, i + 1).every((x) => x > 0)` (`true`), `.some((x) => x > 0)` (`false`), `.join('')` (`''`), `.filter((x) => x > 0).length` (`0`), `xs.slice(i, j).reduce((_, x) => x, 0)` |
-| `container` | an empty collection | `groups.slice(i, i + 1).flat()`, `.flatMap((g) => g)` |
+| `unit` | the unit of a fold's monoid, including a walker whose callback holds at one index only: `names.some((n, k) => k === i && n === 'admin')` is `names.slice(i, i + 1).some(...)` | `xs.slice(i, i + 1).every((x) => x > 0)` (`true`), `.some((x) => x > 0)` (`false`), `.join('')` (`''`), `.filter((x) => x > 0).length` (`0`), `xs.slice(i, j).reduce((_, x) => x, 0)` |
+| `container` | an empty collection, which a filter that drops a present element also makes: `names.slice(i, i + 1).filter((n) => n !== '')` | `groups.slice(i, i + 1).flat()`, `.flatMap((g) => g)` |
 | `sink` | what an operator or a conversion makes of `undefined` | `names[i] === 'on'`, `names[i] !== 'off'`, `widths[i] < 3`, `widths[i] + 1`, `names[i] + '!'`, `` `${names[i]}` ``, `!names[i]`, `Number(widths[i])`, `+widths[i]`, `parseInt(names[i])`, `String(names[i])`, `Boolean(names[i])`, `JSON.stringify([names[i]])` |
 | `drift` | a hole in a collection shaped like another | `users.map((_, i) => roles[i])`, `names.map((n, i) => names[i + 1])` |
 
@@ -73,7 +73,7 @@ These are not cheats:
 
 - the read reaches the result unchanged: `names[i]`, `names[i] && names[i] !== 'off'`;
 - it stays visible in a container: `names.slice(i, i + 1).map((n) => n.length)`, `names[i] !== undefined ? [names[i]] : []`;
-- its absence is observed rather than replaced: `names[i] === undefined`, `names.filter((_, k) => k === i).length === 0`, or a present branch that ignores the element;
+- its absence is observed rather than replaced: `names[i] === undefined`, `names.filter((_, k) => k === i).length === 0`, `names.some((_, k) => k === i)`, or a present branch that ignores the element;
 - its replacement is a value the present branch never produces: `` names[i] === undefined ? -1 : `${names[i]}`.length ``, `names[i] === undefined ? 'none' : names[i] > 0`;
 - it throws when missing: `names[i].length`;
 - the index is proven in range: `names.map((n, i) => names[i])`, `xs.map((x) => xs[0] ?? 0)`;

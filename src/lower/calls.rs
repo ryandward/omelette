@@ -434,24 +434,37 @@ impl<'a> Lowerer<'a, '_> {
 impl<'a, 'l> Lowerer<'a, 'l> {
     /// Methods over a list of at most one element: the unit where the slot is absent.
     pub fn short_method(&mut self, s: &Rc<Short<'a>>, name: &str, args: &[Val<'a>]) -> Val<'a> {
+        self.short_method_at(s, name, args, None)
+    }
+    /// A method on a short list whose element sits at index `at` of the list the callback
+    /// receives (0 by default, as for a slice).
+    fn short_method_at(&mut self, s: &Rc<Short<'a>>, name: &str, args: &[Val<'a>], at: Option<&Form>) -> Val<'a> {
         let f = args.first().cloned().unwrap_or(Val::Undef);
+        let index = Val::Num(at.cloned().unwrap_or_default());
         match name {
             "every" | "some" => {
                 let every = name == "every";
                 let unit = Val::Bool(every);
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| {
                     let array = l.this_or(Val::Short(s.clone()));
-                    let v = l.apply(f.clone(), vec![x, Val::int(0), array]);
+                    let v = l.apply(f.clone(), vec![x, index.clone(), array]);
                     l.truthy_split(v)
                 })
             }
+            // The element where the callback holds for it, and otherwise nothing.
+            "find" => self.over_slot(s, Family::Propagate, &Val::Undef, &mut |l, x| {
+                let array = l.this_or(Val::Short(s.clone()));
+                let v = l.apply(f.clone(), vec![x.clone(), index.clone(), array]);
+                let holds = l.truthy_split(v);
+                l.branch(holds, Arm::Val(&x), Arm::Val(&Val::Undef))
+            }),
             "reduce" => {
                 let init = args.get(1).cloned();
                 let unit = init.clone().unwrap_or(Val::Throw);
                 self.over_slot(s, Family::Unit, &unit, &mut |l, x| match &init {
                     Some(z) => {
                         let array = l.this_or(Val::Short(s.clone()));
-                        l.apply(f.clone(), vec![z.clone(), x, Val::int(0), array])
+                        l.apply(f.clone(), vec![z.clone(), x, index.clone(), array])
                     }
                     None => x,
                 })
@@ -463,15 +476,15 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             "flat" => self.over_slot(s, Family::Container, &Val::empty(), &mut |l, x| l.spread(x)),
             "forEach" => self.over_slot(s, Family::Propagate, &Val::Undef, &mut |l, x| {
                 let array = l.this_or(Val::Short(s.clone()));
-                let done = l.apply(f.clone(), vec![x, Val::int(0), array]);
+                let done = l.apply(f.clone(), vec![x, index.clone(), array]);
                 l.strict(vec![done], &mut |_, _| Val::Undef)
             }),
-            "map" | "filter" | "flatMap" => self.short_walk(s, name, &f),
+            "map" | "filter" | "flatMap" => self.short_walk(s, name, &f, at),
             _ => self.term_method(s.list, name, args),
         }
     }
     /// The slot's value under `present`, or `unit` where it is absent or filtered out.
-    fn over_slot(&mut self, s: &Short<'a>, family: Family, unit: &Val<'a>, present: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
+    pub fn over_slot(&mut self, s: &Short<'a>, family: Family, unit: &Val<'a>, present: &mut super::ops::Op1<'a, 'l, '_>) -> Val<'a> {
         let slot = self.split_read(s.read, s.drift, s.items);
         let (elem, keep) = (s.elem.clone(), s.keep.clone());
         let read_list = self.slot_list(s);
@@ -505,7 +518,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
         }
     }
     /// A walker over the short list: its callback runs only where the slot is present.
-    fn short_walk(&mut self, s: &Rc<Short<'a>>, name: &str, f: &Val<'a>) -> Val<'a> {
+    fn short_walk(&mut self, s: &Rc<Short<'a>>, name: &str, f: &Val<'a>, at: Option<&Form>) -> Val<'a> {
         // The walker below runs the callback with its effects, guarded by the list being
         // non-empty; the element's value comes from running it once more, as the walker would.
         let (world, read_list) = (Val::Term(s.var, s.items.ty()), self.slot_list(s));
@@ -517,14 +530,14 @@ impl<'a, 'l> Lowerer<'a, 'l> {
                 l.within(s.read, world, |l| {
                     l.walking.push(read_list);
                     let array = l.this_or(Val::Short(s.clone()));
-                    let out = l.apply(f.clone(), vec![s.elem.clone(), Val::int(0), array]);
+                    let out = l.apply(f.clone(), vec![s.elem.clone(), Val::Num(at.cloned().unwrap_or_default()), array]);
                     l.walking.pop();
                     l.detach(out, &outer, choices)
                 })
             })
         };
         let kind = if name == "filter" { Walker::Filter } else { Walker::Map };
-        let list = self.walker(kind, f, s.list);
+        let list = self.walker_at(kind, f, s.list, at);
         let mut next = Short { list, ..(**s).clone() };
         if name == "filter" {
             let pass = self.truthy_split(applied);
@@ -555,8 +568,13 @@ impl<'a> Lowerer<'a, '_> {
         match name {
             "map" => self.walker(Walker::Map, &f, list).val(),
             "forEach" => self.for_each(list, &f),
-            "every" => Val::Term(self.walker(Walker::Every, &f, list).id, Ty::Bool),
-            "some" => Val::Term(self.walker(Walker::Some, &f, list).id, Ty::Bool),
+            "every" | "some" => {
+                if let Some(selected) = self.selection(list, &f, name) {
+                    return selected;
+                }
+                let kind = if name == "every" { Walker::Every } else { Walker::Some };
+                Val::Term(self.walker(kind, &f, list).id, Ty::Bool)
+            }
             "filter" => self.filter(list, &f),
             "find" => self.find(list, &f),
             "reduce" => self.reduce(list, &f, args.get(1).cloned()),
@@ -581,9 +599,13 @@ impl<'a> Lowerer<'a, '_> {
     /// binders. An unknown callback stays opaque. The result's elements are the callback's
     /// values for a map, and the list's own otherwise.
     pub fn walker(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> Seq {
+        self.walker_at(kind, f, list, None)
+    }
+    /// [`Self::walker`], with the callback receiving index `at` rather than each element's.
+    fn walker_at(&mut self, kind: Walker, f: &Val<'a>, list: Seq, at: Option<&Form>) -> Seq {
         let (state, this) = (self.state.clone(), self.this_or(list.val()));
         let (lam, items) = match f {
-            Val::Fun(_) | Val::Builtin(_) => self.callback(kind, f, list),
+            Val::Fun(_) | Val::Builtin(_) => self.callback(kind, f, list, at),
             other => {
                 let lam = self.emit(other);
                 self.clobber();
@@ -613,11 +635,12 @@ impl<'a> Lowerer<'a, '_> {
         Seq { id: node, items: if kind == Walker::Map { items } else { list.items } }
     }
     /// The callback's lambda, and whether every value it returns is defined.
-    fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq) -> (Id, Items) {
+    fn callback(&mut self, kind: Walker, f: &Val<'a>, list: Seq, at: Option<&Form>) -> (Id, Items) {
         let (x, i) = (self.b.element(list.items), self.b.fresh(Kind::Index));
         self.coords.insert(i, list.id);
         self.members.insert(x, list.id);
-        let args = vec![Val::Term(x, list.items.ty()), Val::Num(Form::atom(i)), self.this_or(list.val())];
+        let index = at.map_or_else(|| Form::atom(i), Form::clone);
+        let args = vec![Val::Term(x, list.items.ty()), Val::Num(index), self.this_or(list.val())];
         self.walking.push(list.id);
         let before = self.next_ref;
         let result = self.repeat(list.id, 1, |l| l.apply(f.clone(), args));
@@ -740,14 +763,52 @@ impl<'a> Lowerer<'a, '_> {
             let read = self.element(list, &index);
             return projected(walked, slot, &read);
         }
+        if let Some(selected) = self.selection(list, f, "filter") {
+            return selected;
+        }
         self.walker(Walker::Filter, f, list).val()
     }
     fn find(&mut self, list: Seq, f: &Val<'a>) -> Val<'a> {
         if let Some((index, _)) = self.projection(f, list) {
             return self.element(list, &index);
         }
+        if let Some(selected) = self.selection(list, f, "find") {
+            return selected;
+        }
         let walked = self.walker(Walker::Filter, f, list);
         self.element(walked, &Form::constant(0))
+    }
+    /// A walker whose callback, without effects and without throwing, can hold at only one
+    /// index `k` (for `every`, fail at only one): the walk is decided by the element at `k`
+    /// alone, so it is the same walker over the slot at `k`, the callback still receiving `k`.
+    /// The callback is lowered once on symbolic arguments, and the structure of its truth
+    /// (`and`, `or`, `not`, `if` around the index's equality) tells which index it pins, so
+    /// `i === k && p`, `i === k ? p : false`, and an early `return false` decide alike.
+    fn selection(&mut self, list: Seq, callback: &Val<'a>, name: &str) -> Option<Val<'a>> {
+        if !matches!(callback, Val::Fun(_)) {
+            return None;
+        }
+        let (element, index) = (self.b.element(list.items), self.b.fresh(Kind::Index));
+        self.coords.insert(index, list.id);
+        self.members.insert(element, list.id);
+        let args = vec![Val::Term(element, list.items.ty()), Val::Num(Form::atom(index)), self.this_or(list.val())];
+        let (truth, effects) = self.speculate(|l| {
+            let (before, opaque) = (l.state.clone(), l.opaque);
+            l.walking.push(list.id);
+            let value = l.apply(callback.clone(), args);
+            l.walking.pop();
+            let raises = l.may_raise(&value);
+            let holds = l.truthy_split(value);
+            let effects = raises || l.effects_since(&before, opaque);
+            (l.emit(&holds), effects)
+        });
+        if effects {
+            return None;
+        }
+        let pinned = self.b.pins(truth, index, name != "every")?.into_iter().find(|at| !self.b.binds(at))?;
+        let end = pinned.plus(&Form::constant(1), 1)?;
+        let Val::Short(slot) = self.slice(list, Some(Val::Num(pinned.clone())), Some(Val::Num(end))) else { return None };
+        Some(self.short_method_at(&slot, name, std::slice::from_ref(callback), Some(&pinned)))
     }
     /// The index `j` when the callback is `(_, idx) => idx === j` (either side) with `j` an
     /// integer that mentions neither parameter: the filter keeps at most `list[j]`. Also the
@@ -914,10 +975,7 @@ impl<'a> Lowerer<'a, '_> {
         self.walking.push(walk.list.id);
         let result = self.apply(walk.f.clone(), args);
         self.walking.pop();
-        let effects = !self.written_since(&before).is_empty()
-            || !self.state.log.identical(&before.log)
-            || !Rc::ptr_eq(&self.state.escaped, &before.escaped)
-            || self.opaque != opaque;
+        let effects = self.effects_since(&before, opaque);
         let body = self.emit(&result);
         (body, self.static_type(result), effects)
     }
