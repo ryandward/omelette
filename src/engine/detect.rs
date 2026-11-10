@@ -32,8 +32,11 @@ struct Context {
 /// callback over an empty list, so detection does not descend into them. A witness or escape
 /// counts only if the root has no representative that avoids its class.
 pub fn scan(g: &Graph, root: Id) -> Findings {
+    // A free value that may be undefined or a function may make a branch test presence or
+    // ignore the element; one declared otherwise cannot.
     let unknown = |_: Id, n: &Core| {
-        matches!(n, Core::Call(_) | Core::Unsupported(_)) || matches!(n, Core::Var(v) if matches!(v.kind, Kind::Any | Kind::Fun))
+        matches!(n, Core::Call(_) | Core::Unsupported(_))
+            || matches!(n, Core::Var(v) if v.kind == Kind::Fun || (v.kind == Kind::Any && v.values().meets(Shape::UNDEF.or(Shape::FUN))))
     };
     let ctx = Context {
         root: g.find(root),
@@ -327,14 +330,21 @@ impl Apart<'_> {
         if self.direct(z, body) {
             return true;
         }
-        if let Some(Const::Str(text)) = &g[z].data.constant
-            && self.affixes(&text.units(), body, 6)
-        {
-            return true;
-        }
-        // Lists differ where their heads or their tails do.
-        let cells = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::Cons(c) = n { Some(*c) } else { None });
-        if cells(z).any(|[zh, zt]| cells(body).any(|[bh, bt]| self.distinct(zh, bh, false) || self.distinct(zt, bt, false))) {
+        // Records differ where a field both have holds values apart, as a tag does.
+        let records = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::Obj(fields) = n { Some(fields.clone()) } else { None });
+        let named = |fields: &[Id]| -> Vec<(Const, Id)> {
+            fields.chunks(2).filter_map(|pair| match pair {
+                [name, value] => g[*name].data.constant.clone().map(|c| (c, *value)),
+                _ => None,
+            }).collect()
+        };
+        if records(z).any(|zf| {
+            let zf = named(&zf);
+            records(body).any(|bf| {
+                let bf = named(&bf);
+                zf.iter().any(|(name, zv)| bf.iter().any(|(other, bv)| other == name && self.distinct(*zv, *bv, false)))
+            })
+        }) {
             return true;
         }
         let arms = |id: Id| g[id].nodes.iter().filter_map(|n| if let Core::If([c, y, n]) = n { Some((g.find(*c), *y, *n)) } else { None });
@@ -356,53 +366,30 @@ impl Apart<'_> {
         fixed
     }
 
-    /// Whether the text `z` differs from every string `body` takes: `body` joins a constant
-    /// prefix `z` does not start with, or a constant suffix it does not end with, or the rest
-    /// of `z` differs from the rest of `body`.
-    fn affixes(&self, z: &[u16], body: Id, depth: u8) -> bool {
-        let text = |id: Id| match &self.g[id].data.constant {
-            Some(Const::Str(units)) => Some(units.units()),
-            _ => None,
-        };
-        let rest = |rest: &[u16], id: Id| depth > 0 && self.affixes(rest, id, depth - 1);
-        self.g[body].nodes.iter().any(|node| {
-            let Core::Concat([left, right]) = node else { return false };
-            match (text(*left), text(*right)) {
-                (Some(prefix), _) => z.strip_prefix(prefix.as_slice()).is_none_or(|tail| rest(tail, *right)),
-                (_, Some(suffix)) => z.strip_suffix(suffix.as_slice()).is_none_or(|head| rest(head, *left)),
-                _ => false,
-            }
-        }) || text(body).is_some_and(|whole| whole != z)
-    }
-
-    /// Whether `z` differs from every value `body` takes, by their facts alone: a type the
-    /// body never has, another constant, a value outside the integers or the bounds the body
-    /// keeps to, or a list whose length always differs from the body's.
+    /// Whether `z` differs from every value `body` takes, as types and tags decide: a type
+    /// the body never has, another literal (a tag), or the empty option where the body always
+    /// adds an element. Within one type, nothing finer counts: a number outside the body's
+    /// bounds, a string the body's text could never spell, or a list of another length is a
+    /// value of the type the answer has, so it may stand for one.
     fn direct(&self, z: Id, body: Id) -> bool {
         let g = self.g;
         let (zd, bd) = (&g[z].data, &g[body].data);
         if !zd.shape.meets(bd.shape) {
             return true;
         }
-        if zd.shape.within(Shape::LIST)
-            && bd.shape.within(Shape::LIST)
-            && let Some(gap) = length(g, body, 16).plus(&length(g, z, 16), -1)
-        {
-            // Every unknown length is at least zero, so a gap whose parts share a sign and
-            // whose constant has it too is never zero.
-            let longer = gap.constant > 0 && gap.terms.values().all(|&c| c >= 0);
-            let shorter = gap.constant < 0 && gap.terms.values().all(|&c| c <= 0);
-            if longer || shorter {
+        // The empty option: `z` spells no element of its own (it is `[]`, or the accumulator
+        // the body extends), and the body has at least one more.
+        if zd.shape.within(Shape::LIST) && bd.shape.within(Shape::LIST) {
+            let own = length(g, z, 16);
+            if own.constant == 0
+                && let Some(gap) = length(g, body, 16).plus(&own, -1)
+                && gap.constant > 0
+                && gap.terms.values().all(|&c| c >= 0)
+            {
                 return true;
             }
         }
-        let Some(c) = &zd.constant else { return false };
-        let outside = match c {
-            Const::Int(v) => bd.lo.is_some_and(|l| *v < l) || bd.hi.is_some_and(|h| *v > h),
-            // Only integers have bounds.
-            _ => bd.lo.is_some() || bd.hi.is_some(),
-        };
-        outside || bd.constant.as_ref().is_some_and(|d| d != c)
+        zd.constant.as_ref().zip(bd.constant.as_ref()).is_some_and(|(c, d)| c != d)
     }
 }
 

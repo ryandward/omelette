@@ -89,6 +89,11 @@ impl<'a> Lowerer<'a, '_> {
         match v {
             Val::Throw | Val::NaN | Val::Num(_) => v,
             Val::Undef | Val::Fun(_) | Val::Builtin(_) => Val::NaN,
+            // A record's text is `[object Object]`, which is no number.
+            Val::Record(fields) => {
+                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::new(n.encode_utf16())));
+                if own { self.unsupported() } else { Val::NaN }
+            }
             Val::Bool(b) => Val::int(i64::from(b)),
             Val::Str(s) => match string_number(&s.units()) {
                 Parsed::Int(n) => Val::int(n),
@@ -179,6 +184,26 @@ impl<'a> Lowerer<'a, '_> {
                 self.binary(Bin::Add, out, text("]"))
             }
             b @ Val::Term(_, Ty::Bool) => self.select(&b, text("true"), text("false")),
+            // A record whose every field always writes: its fields, in order. A field that may
+            // write nothing (undefined, a function, an object with `toJSON`) is not modeled.
+            Val::Record(fields) => {
+                let always = |l: &Self, v: &Val<'a>| matches!(v, Val::Record(_) | Val::List(_)) || l.shape(v).within(Shape::BOOL.or(Shape::NUM).or(Shape::STR).or(Shape::LIST));
+                if !fields.iter().all(|(_, v)| always(self, v)) {
+                    return self.unsupported();
+                }
+                let mut out = text("{");
+                for (k, (name, value)) in fields.iter().enumerate() {
+                    let part = self.lift(value.clone(), Family::Sink, &mut |l, v| l.json(v, open, false));
+                    if matches!(part, Val::Throw) {
+                        return Val::Throw;
+                    }
+                    let key = Val::Str(Utf16::new(quote(&name.units()).into_iter().chain(":".encode_utf16())));
+                    let head = if k > 0 { self.binary(Bin::Add, out, text(",")) } else { out };
+                    let head = self.binary(Bin::Add, head, key);
+                    out = self.binary(Bin::Add, head, part);
+                }
+                self.binary(Bin::Add, out, text("}"))
+            }
             // A list's text is always a string: its elements that have none write `null`.
             v @ (Val::Term(_, Ty::Str | Ty::List(_)) | Val::Short(_)) => self.shaped("json", &[&v], Ty::Str, Shape::STR),
             // As an element, anything writes some text, and so does a primitive or a list.

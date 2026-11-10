@@ -38,6 +38,7 @@ impl<'a> Lowerer<'a, '_> {
             Expression::LogicalExpression(l) => self.logical(l),
             Expression::ConditionalExpression(c) => self.conditional(c),
             Expression::ArrayExpression(a) => self.array(a),
+            Expression::ObjectExpression(o) => self.record(o),
             Expression::StaticMemberExpression(m) if !m.optional => {
                 if let Some(b) = self.builtin_member(e) {
                     return Val::Builtin(b);
@@ -172,6 +173,37 @@ impl<'a> Lowerer<'a, '_> {
             }
         }
         out
+    }
+    /// An object literal with named fields, evaluated in order: a record. Computed names,
+    /// spreads, methods, and accessors are not modeled.
+    fn record(&mut self, o: &'a oxc_ast::ast::ObjectExpression<'a>) -> Val<'a> {
+        use oxc_ast::ast::{ObjectPropertyKind, PropertyKind};
+        let mut names = Vec::with_capacity(o.properties.len());
+        let mut values = Vec::with_capacity(o.properties.len());
+        for property in &o.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = property else { return self.unsupported() };
+            let name = p.key.static_name();
+            let name = name.as_ref().and_then(|n| n.as_str());
+            let (Some(name), false, false, PropertyKind::Init) = (name, p.computed, p.method, p.kind) else { return self.unsupported() };
+            if name == "__proto__" {
+                return self.unsupported();
+            }
+            names.push(Utf16::new(name.encode_utf16()));
+            values.push(self.expr(&p.value));
+        }
+        self.strict(values, &mut |l, values| {
+            // A name written twice keeps its first place and its last value; an array in a
+            // field keeps its identity, as one in an array does.
+            let mut fields: Vec<(Utf16, Val<'a>)> = Vec::with_capacity(values.len());
+            for (name, value) in names.iter().zip(values) {
+                let value = l.own(value);
+                match fields.iter_mut().find(|(n, _)| n == name) {
+                    Some(field) => field.1 = value,
+                    None => fields.push((*name, value)),
+                }
+            }
+            Val::Record(Rc::new(fields))
+        })
     }
     /// An array literal: every element is evaluated, so one that throws makes it throw.
     fn array(&mut self, a: &'a ArrayExpression<'a>) -> Val<'a> {

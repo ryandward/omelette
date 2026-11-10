@@ -182,7 +182,8 @@ impl<'a> Lowerer<'a, '_> {
         // The contents decide the operation; an array keeps its identity into its text, so a
         // cycle in it is written once.
         let (x, y) = (self.deref(a.clone()), self.deref(b.clone()));
-        if is_text(&x) || is_text(&y) || x.items().is_some() || y.items().is_some() {
+        let object = |v: &Val<'_>| v.items().is_some() || matches!(v, Val::Record(_));
+        if is_text(&x) || is_text(&y) || object(&x) || object(&y) {
             let (a, b) = (self.to_text(a), self.to_text(b));
             return self.concat(&a, &b);
         }
@@ -191,7 +192,7 @@ impl<'a> Lowerer<'a, '_> {
     fn arith(&mut self, op: Bin, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         // Arithmetic reads a known string or list as the number it spells.
         let mut known = |v: &Val<'a>| {
-            if matches!(v, Val::Str(_) | Val::Term(_, Ty::Bool)) || v.items().is_some() { self.to_number(v.clone()) } else { v.clone() }
+            if matches!(v, Val::Str(_) | Val::Record(_) | Val::Term(_, Ty::Bool)) || v.items().is_some() { self.to_number(v.clone()) } else { v.clone() }
         };
         let (a, b) = (&known(a), &known(b));
         let (Some(lhs), Some(rhs)) = (numeric(a), numeric(b)) else {
@@ -229,8 +230,9 @@ impl<'a> Lowerer<'a, '_> {
     fn order(&mut self, strict: bool, a: &Val<'a>, b: &Val<'a>) -> Val<'a> {
         // A list compares as its text; a known string against a number, as its number.
         let (x, y) = (self.deref(a.clone()), self.deref(b.clone()));
-        if x.items().is_some() || y.items().is_some() {
-            let text = |l: &mut Self, v: &Val<'a>, contents: Val<'a>| if contents.items().is_some() { l.to_text(v.clone()) } else { contents };
+        let object = |v: &Val<'_>| v.items().is_some() || matches!(v, Val::Record(_));
+        if object(&x) || object(&y) {
+            let text = |l: &mut Self, v: &Val<'a>, contents: Val<'a>| if object(&contents) { l.to_text(v.clone()) } else { contents };
             let (a, b) = (text(self, a, x), text(self, b, y));
             return self.lift2(a, b, Family::Sink, &mut |l, a, b| l.order(strict, &a, &b));
         }
@@ -318,7 +320,7 @@ impl<'a> Lowerer<'a, '_> {
                 None => self.nonzero(&f),
             },
             Val::Str(s) => Val::Bool(!s.units().is_empty()),
-            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Builtin(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Val::Bool(true),
+            Val::List(_) | Val::Short(_) | Val::Fun(_) | Val::Builtin(_) | Val::Record(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Val::Bool(true),
             Val::Term(_, Ty::Str) => {
                 let eq = self.strict_eq(&v, &Val::Str(Utf16::new([])));
                 self.not(eq)
@@ -354,6 +356,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Str(_) => Shape::STR,
             Val::List(_) | Val::Short(_) | Val::Ref(_) => Shape::LIST,
             Val::Fun(_) | Val::Builtin(_) => Shape::FUN,
+            Val::Record(_) => Shape::OBJ,
             Val::Split(s) => self.shape(&s.absent).or(self.shape(&s.present)),
             Val::Term(id, ty) => self.b.shape(*id).and(ty.shape()),
         }
@@ -380,6 +383,11 @@ impl<'a> Lowerer<'a, '_> {
             Val::NaN => text("NaN"),
             Val::Bool(b) => text(if b { "true" } else { "false" }),
             Val::Num(ref f) if f.known().is_some() => text(&f.constant.to_string()),
+            // A record writes as the text every plain object does, unless it says otherwise.
+            Val::Record(ref fields) => {
+                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::new(n.encode_utf16())));
+                if own { self.unsupported() } else { text("[object Object]") }
+            }
             // A list's text is its elements joined by commas.
             Val::List(ref items) => self.join_items(items, None),
             Val::Short(ref s) => self.short_method(s, "join", &[]),
@@ -409,6 +417,11 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// [`Self::dynamic`], producing only values of `shape`.
     pub fn shaped(&mut self, name: &str, args: &[&Val<'a>], ty: Ty, shape: Shape) -> Val<'a> {
+        // A read that may be missing, held inside a list or a record, would reach an operation
+        // lowering does not model unlifted: the expression's value is then unknown.
+        if args.iter().any(|a| nested_read(a)) {
+            self.opaque = true;
+        }
         let mut children = vec![self.b.text(Utf16::new(name.encode_utf16())), self.b.add(Core::Kinds(shape))];
         children.extend(args.iter().map(|v| self.emit(v)));
         let node = if shape.meets(Shape::UNDEF) { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
@@ -455,6 +468,9 @@ fn identical_object(a: &Val<'_>, b: &Val<'_>) -> Option<bool> {
     match (a, b) {
         (Val::List(x), Val::List(y)) => Some(Rc::ptr_eq(x, y)),
         (Val::Fun(x), Val::Fun(y)) => Some(Rc::ptr_eq(x, y)),
+        (Val::Record(x), Val::Record(y)) => Some(Rc::ptr_eq(x, y)),
+        // A record just built is no array and no other object.
+        (Val::Record(_), v) | (v, Val::Record(_)) if fresh(v) || matches!(v, Val::Ref(_)) => Some(false),
         (Val::Ref(x), Val::Ref(y)) if x == y => Some(true),
         // A choice may be either of its alternatives.
         (Val::Ref(RefKey::Choice(_)), _) | (_, Val::Ref(RefKey::Choice(_))) => None,
@@ -488,7 +504,7 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
         Val::Str(_) | Val::Term(_, Ty::Str) => Some(1),
         Val::Bool(_) | Val::Term(_, Ty::Bool) => Some(2),
         Val::Undef => Some(3),
-        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) => Some(4),
+        Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Ref(_) | Val::Record(_) => Some(4),
         Val::Term(_, Ty::Defined) => Some(5),
         _ => None,
     };
@@ -505,4 +521,21 @@ fn distinct_types(a: &Val<'_>, b: &Val<'_>) -> bool {
 fn exact(f: &Form) -> bool {
     const SAFE: i64 = 9_007_199_254_740_991;
     std::iter::once(f.constant).chain(f.terms.values().copied()).all(|v| v.abs() <= SAFE)
+}
+
+/// Whether a value holds, inside a list or a record, a read that may be missing.
+fn nested_read(v: &Val<'_>) -> bool {
+    fn inside(v: &Val<'_>) -> bool {
+        match v {
+            Val::Split(_) => true,
+            Val::List(items) => items.iter().any(inside),
+            Val::Record(fields) => fields.iter().any(|(_, v)| inside(v)),
+            _ => false,
+        }
+    }
+    match v {
+        Val::List(items) => items.iter().any(inside),
+        Val::Record(fields) => fields.iter().any(|(_, v)| inside(v)),
+        _ => false,
+    }
 }

@@ -35,7 +35,7 @@ fn malformed_input_is_an_error_and_limits_are_undecided() {
     ] {
         assert!(evaluate(source).is_err(), "{source}");
     }
-    for source in ["xs?.foo(1)", "({ x: 1 }).x", "null ?? 0", "1.5", "xs.foo(1)"] {
+    for source in ["xs?.foo(1)", "({ ...o }).x", "null ?? 0", "1.5", "xs.foo(1)"] {
         assert_eq!(evaluate(source).unwrap().verdict, Verdict::Undecided, "{source}");
     }
     let tight = Limits { iterations: 1, nodes: 100, time: Duration::from_secs(1) };

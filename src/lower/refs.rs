@@ -162,6 +162,9 @@ impl<'a> Lowerer<'a, '_> {
                 self.over_slot(&s, Family::Container, &Val::empty(), &mut |_, e| Val::List(Rc::new(vec![e])))
             }
             Val::List(items) if items.iter().any(filtered) => Val::List(Rc::new(items.iter().map(|v| self.slots(v.clone())).collect())),
+            Val::Record(fields) if fields.iter().any(|(_, v)| filtered(v)) => {
+                Val::Record(Rc::new(fields.iter().map(|(k, v)| (*k, self.slots(v.clone()))).collect()))
+            }
             Val::Split(s) if filtered(&s.absent) || filtered(&s.present) => {
                 let (absent, present) = (self.slots(s.absent.clone()), self.slots(s.present.clone()));
                 Val::Split(Rc::new(Split { absent, present, ..(*s).clone() }))
@@ -192,6 +195,9 @@ impl<'a> Lowerer<'a, '_> {
                 out
             }
             Val::List(items) if items.iter().any(holds_ref) => Val::List(Rc::new(items.iter().map(|v| self.resolve(v.clone())).collect())),
+            Val::Record(fields) if fields.iter().any(|(_, v)| holds_ref(v)) => {
+                Val::Record(Rc::new(fields.iter().map(|(k, v)| (*k, self.resolve(v.clone()))).collect()))
+            }
             Val::Split(s) if holds_ref(&s.absent) || holds_ref(&s.present) => {
                 let (absent, present) = (self.resolve(s.absent.clone()), self.resolve(s.present.clone()));
                 Val::Split(Rc::new(Split { absent, present, ..(*s).clone() }))
@@ -212,6 +218,9 @@ impl<'a> Lowerer<'a, '_> {
                 self.detach(contents, outer, choices)
             }
             Val::List(items) if items.iter().any(holds_ref) => Val::List(Rc::new(items.iter().map(|v| self.detach(v.clone(), outer, choices)).collect())),
+            Val::Record(fields) if fields.iter().any(|(_, v)| holds_ref(v)) => {
+                Val::Record(Rc::new(fields.iter().map(|(k, v)| (*k, self.detach(v.clone(), outer, choices))).collect()))
+            }
             Val::Split(s) if holds_ref(&s.absent) || holds_ref(&s.present) => {
                 let (absent, present) = (self.detach(s.absent.clone(), outer, choices), self.detach(s.present.clone(), outer, choices));
                 Val::Split(Rc::new(Split { absent, present, ..(*s).clone() }))
@@ -494,6 +503,7 @@ impl<'a> Lowerer<'a, '_> {
         match v {
             Val::Split(_) | Val::Short(_) => true,
             Val::List(items) => items.iter().any(|v| self.reads_in(v, state, open)),
+            Val::Record(fields) => fields.iter().any(|(_, v)| self.reads_in(v, state, open)),
             Val::Term(id, _) => self.b.reads(*id),
             Val::Ref(k) if !open.contains(k) => {
                 open.push(*k);
@@ -615,6 +625,7 @@ pub fn holds_ref(v: &Val<'_>) -> bool {
     match v {
         Val::Ref(_) => true,
         Val::List(items) => items.iter().any(holds_ref),
+        Val::Record(fields) => fields.iter().any(|(_, v)| holds_ref(v)),
         Val::Split(s) => holds_ref(&s.absent) || holds_ref(&s.present),
         _ => false,
     }
@@ -625,6 +636,7 @@ fn filtered(v: &Val<'_>) -> bool {
     match v {
         Val::Short(s) => !matches!(s.keep, Val::Bool(true)),
         Val::List(items) => items.iter().any(filtered),
+        Val::Record(fields) => fields.iter().any(|(_, v)| filtered(v)),
         Val::Split(s) => filtered(&s.absent) || filtered(&s.present),
         _ => false,
     }

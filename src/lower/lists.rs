@@ -2,7 +2,7 @@
 use super::Lowerer;
 use super::value::{Items, Seq, Short, Split, Ty, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family, Shape};
+use crate::core::{Core, Family, Shape, Utf16};
 use egg::Id;
 use std::rc::Rc;
 
@@ -18,6 +18,9 @@ impl<'a> Lowerer<'a, '_> {
         let Val::Num(f) = index else {
             return match (&list, index) {
                 (Val::Throw | Val::Undef, _) | (_, Val::Throw) => Val::Throw,
+                (Val::Record(fields), Val::Str(name)) => self.field(fields, *name),
+                // A key not known: one of the record's values, or none.
+                (Val::Record(_), _) => self.dynamic("prop", &[&list, index], Ty::Any),
                 (_, Val::Undef) => Val::Undef,
                 _ => self.unsupported(),
             };
@@ -180,9 +183,27 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef | Val::Throw => Val::Throw,
             v => {
                 l.consume(&v);
-                if name == "length" { l.length(v) } else { l.unsupported() }
+                match v {
+                    Val::Record(fields) => l.field(&fields, Utf16::new(name.encode_utf16())),
+                    // A value of unknown type may hold any value there, or none.
+                    Val::Term(_, Ty::Defined | Ty::Any) if name != "length" => {
+                        let key = Val::Str(Utf16::new(name.encode_utf16()));
+                        l.dynamic("prop", &[&v, &key], Ty::Any)
+                    }
+                    v if name == "length" => l.length(v),
+                    _ => l.unsupported(),
+                }
             }
         })
+    }
+    /// A record's field: its value, or undefined where it has none. A name every object
+    /// inherits, such as `toString`, is not modeled.
+    pub fn field(&mut self, fields: &[(Utf16, Val<'a>)], name: Utf16) -> Val<'a> {
+        if let Some((_, value)) = fields.iter().rev().find(|(n, _)| *n == name) {
+            return value.clone();
+        }
+        let inherited = ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString", "constructor", "__proto__"];
+        if inherited.iter().any(|n| Utf16::new(n.encode_utf16()) == name) { self.unsupported() } else { Val::Undef }
     }
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and
     /// possibly undefined for a value of unknown type.
@@ -249,7 +270,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::List(_) | Val::Short(_) | Val::Term(_, Ty::List(_)) | Val::Throw => v,
             Val::Str(s) => Val::List(Rc::new(code_points(&s.units()).into_iter().map(Val::Str).collect())),
             Val::Term(_, Ty::Str) => self.dynamic("iterate", &[&v], Ty::List(Items::DEFINED)),
-            Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Builtin(_) | Val::Term(_, Ty::Bool) => Val::Throw,
+            Val::Undef | Val::NaN | Val::Bool(_) | Val::Num(_) | Val::Fun(_) | Val::Builtin(_) | Val::Record(_) | Val::Term(_, Ty::Bool) => Val::Throw,
             Val::Term(_, Ty::Defined | Ty::Any) | Val::Split(_) => {
                 let spread = self.dynamic("iterate", &[&v], Ty::List(Items::ANY));
                 self.clobber();

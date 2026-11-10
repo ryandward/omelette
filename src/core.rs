@@ -60,6 +60,8 @@ define_language! {
         // A possibly missing read (its value, then its `has`) left as a hole in a collection
         // shaped like another.
         "escape" = Escape([Id; 2]),
+        // An object the expression built: each field's name, then its value.
+        "obj" = Obj(Box<[Id]>),
         // A call of a function lowering could not resolve: callee, then arguments.
         "call" = Call(Box<[Id]>),
         // A list's elements in the order a comparator (or `undefined`) sorts them, and in
@@ -351,6 +353,7 @@ pub fn shape_of(n: &Core, known: &impl Known) -> Shape {
         | Core::Sort(_)
         | Core::Reverse(_) => Shape::LIST,
         Core::Lam(_) => Shape::FUN,
+        Core::Obj(_) => Shape::OBJ,
         Core::Throw => Shape::NONE,
         Core::If([_, yes, no]) => of(yes).or(of(no)),
         Core::Maybe([_, z, lam, ..]) | Core::Elim([z, lam, ..]) => of(z).or(known.returns(*lam).0),

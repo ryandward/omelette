@@ -625,7 +625,7 @@ impl<'a> Lowerer<'a, '_> {
             }
             "filter" => self.filter(list, &f),
             "find" => self.find(list, &f),
-            "reduce" => self.reduce(list, &f, args.get(1).cloned()),
+            "reduce" | "reduceRight" => self.reduce(list, &f, args.get(1).cloned(), name == "reduceRight"),
             "includes" if args.get(1).is_none_or(|from| matches!(from, Val::Undef)) => self.includes(list, &f),
             "join" => {
                 let sep = self.separator(args.first().cloned());
@@ -932,7 +932,10 @@ impl<'a> Lowerer<'a, '_> {
 impl<'a> Lowerer<'a, '_> {
     /// `list.reduce(f, init)`. A callback that ignores its accumulator yields its value on the
     /// last element, or the initial value for an empty list.
-    fn reduce(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>) -> Val<'a> {
+    /// `reduce`, or with `right` `reduceRight`, whose callback ignoring its accumulator
+    /// yields its value on the first element instead; a `reduceRight` that reads its
+    /// accumulator is not modeled.
+    fn reduce(&mut self, list: Seq, f: &Val<'a>, init: Option<Val<'a>>, right: bool) -> Val<'a> {
         // A callback that reads its accumulator does not ignore it, so it is a fold.
         let reads_acc = match f {
             Val::Fun(fun) => fun.params.items.first().is_some_and(|p| match &p.pattern {
@@ -942,10 +945,10 @@ impl<'a> Lowerer<'a, '_> {
             _ => false,
         };
         if reads_acc {
-            return self.fold(list, f, init);
+            return if right { self.unsupported() } else { self.fold(list, f, init) };
         }
         let len = Form::atom(self.b.add(Core::Len(list.id)));
-        let final_index = len.plus(&Form::constant(1), -1).unwrap_or_default();
+        let final_index = if right { Form::constant(0) } else { len.plus(&Form::constant(1), -1).unwrap_or_default() };
         let slot = self.element(list, &final_index);
         let acc = self.b.fresh(Kind::Acc);
         let unit = init.clone().unwrap_or(Val::Throw);
@@ -968,7 +971,7 @@ impl<'a> Lowerer<'a, '_> {
         if self.b.mentions(id, acc) || (init.is_none() && !returns_element) || !self.state.same(&before) {
             // The attempt is discarded, and so is what it found it could not model.
             (self.state, self.opaque) = (before, opaque);
-            return self.fold(list, &f, init);
+            return if right { self.unsupported() } else { self.fold(list, &f, init) };
         }
         body
     }

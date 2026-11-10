@@ -255,6 +255,10 @@ impl Builder {
             Val::Fun(_) => self.unsupported(),
             // The global itself: a function the graph knows only by name.
             Val::Builtin(b) => self.var(Kind::Fun, b.name()),
+            Val::Record(fields) => {
+                let children: Vec<Id> = fields.iter().flat_map(|(name, value)| [self.add(Core::Str(*name)), self.emit(value)]).collect();
+                self.add(Core::Obj(children.into()))
+            }
             Val::Term(id, _) => *id,
             Val::Split(s) => self.split(s),
             Val::Ref(_) => unreachable!("lowering resolves references before emitting"),

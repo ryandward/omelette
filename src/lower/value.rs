@@ -101,6 +101,9 @@ pub enum Val<'a> {
     Fun(Rc<Fun<'a>>),
     /// A global function lowering models.
     Builtin(Builtin),
+    /// An object the expression built from a literal: its fields, in the order written.
+    /// Lowering does not model writing to one.
+    Record(Rc<Vec<(Utf16, Val<'a>)>>),
     Term(Id, Ty),
     Split(Rc<Split<'a>>),
     /// An array with identity: one the caller holds, or one this expression allocated and
@@ -211,6 +214,7 @@ impl Val<'_> {
             (Self::Short(a), Self::Short(b)) => Rc::ptr_eq(a, b),
             (Self::Fun(a), Self::Fun(b)) => Rc::ptr_eq(a, b),
             (Self::Builtin(a), Self::Builtin(b)) => a == b,
+            (Self::Record(a), Self::Record(b)) => Rc::ptr_eq(a, b),
             (Self::Split(a), Self::Split(b)) => Rc::ptr_eq(a, b),
             (Self::Term(a, _), Self::Term(b, _)) => a == b,
             (Self::Ref(a), Self::Ref(b)) => a == b,
@@ -232,6 +236,7 @@ impl Val<'_> {
             Self::Throw => true,
             Self::Split(s) => s.absent.may_throw() || s.present.may_throw(),
             Self::List(items) => items.iter().any(Val::may_throw),
+            Self::Record(fields) => fields.iter().any(|(_, v)| v.may_throw()),
             _ => false,
         }
     }
@@ -247,6 +252,7 @@ impl Val<'_> {
             | Self::Short(_)
             | Self::Fun(_)
             | Self::Builtin(_)
+            | Self::Record(_)
             | Self::Term(..)
             | Self::Ref(_) => true,
         }

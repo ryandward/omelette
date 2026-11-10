@@ -326,6 +326,7 @@ impl<'a> Lowerer<'a, '_> {
             }
             // An array just built, which nothing else holds.
             v if v.items().is_some() => value,
+            // Writing to a record is not modeled.
             _ => self.unsupported(),
         }
     }

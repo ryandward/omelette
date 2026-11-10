@@ -103,7 +103,7 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
 /// expression.
 fn has_prelude(source: &str) -> bool {
     let first = source.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
-    matches!(first, "declare" | "const" | "function" | "let" | "var")
+    matches!(first, "declare" | "const" | "function" | "let" | "var" | "type" | "interface")
 }
 
 fn parse<'a>(arena: &'a Allocator, source: &'a str) -> Result<Program<'a>, String> {

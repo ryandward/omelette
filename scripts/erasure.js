@@ -9,7 +9,9 @@
 // any context is a cheat. The oracle evaluates c on a missing read and on a pool of present
 // elements, in every context:
 // - "no cheat" with a collision is unsound: the missing read is erased into a present one;
-// - a cheat verdict with no collision may be the pool's limit, and is reported as a note.
+// - a cheat verdict with no collision may be the pool's limit, and is reported as a note. It may
+//   also be by design: omelette calls a default of the answer's type a cheat even where no value
+//   collides (`-1` against a length), so the notes overcount.
 // An expression whose result is the same for every element and the missing read never uses
 // the read, so it erases nothing and is skipped.
 // Elements are never undefined or null: omelette's model of an element excludes both. A
