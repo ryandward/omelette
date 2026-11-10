@@ -50,7 +50,7 @@ fn observing_or_keeping_absence_is_not_a_cheat() {
         "names[i]",
         "names[i] === undefined",
         "names[i] !== undefined ? true : false",
-        "names[i] !== undefined ? y : 5",
+        "names[i] !== undefined ? 'present' : 5",
         "names[i] !== undefined ? [names[i]] : []",
         "names[i] && names[i] !== 'off'",
         "names.slice(i, i + 1).map((n) => n !== 'off')",
@@ -60,11 +60,20 @@ fn observing_or_keeping_absence_is_not_a_cheat() {
         "names.every((n) => n !== 'off')",
         "names.join(', ')",
         "names.map((n, i) => names[i] !== 'off')",
-        "names.map((n) => 5)[i] ?? 0",
+        "names.map((n) => (n === 'x' ? 'a' : 'b'))[i] ?? 'c'",
         "names[i].length",
     ] {
         checked(source, Verdict::NoCheat);
     }
+}
+
+#[test]
+fn a_branch_that_ignores_the_element_is_honest_only_where_it_cannot_answer_the_default() {
+    // Its answer may be the default: a present `5` and a missing read look the same.
+    cheat("declare const n: number; names[i] !== undefined ? n : 5", &[Family::Default]);
+    // An unknown answer may be the default, or not.
+    checked("names[i] !== undefined ? y : 5", Verdict::Undecided);
+    checked("names[i] !== undefined ? 'present' : 5", Verdict::NoCheat);
 }
 
 #[test]

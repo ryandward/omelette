@@ -136,7 +136,7 @@ pub fn evaluate_with_limits(source: &str, limits: Limits) -> Result<Evaluation, 
     let families = if verdict == Verdict::Cheat { found.families.into_iter().collect() } else { Vec::new() };
     let effects = run.roots.get(1).map(|&id| detect::mutations(&run.egraph, id)).unwrap_or_default();
     let mutation = judge_mutation(saturated && consistent, &effects, lowered.opaque);
-    let canonical = Extractor::new(&run.egraph, Cost).find_best(root).1;
+    let canonical = exact(&Extractor::new(&run.egraph, Cost).find_best(root).1);
     Ok(Evaluation {
         verdict,
         families,
@@ -220,7 +220,7 @@ pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
     let roots: Vec<_> = run.roots.iter().map(|&id| run.egraph.find(id)).collect();
     let extractor = Extractor::new(&run.egraph, Cost);
     Ok(JointEvaluation {
-        canonical: roots.iter().map(|&id| extractor.find_best(id).1).collect(),
+        canonical: roots.iter().map(|&id| exact(&extractor.find_best(id).1)).collect(),
         roots,
         saturated: matches!(run.stop_reason, Some(StopReason::Saturated)),
         consistent: run.egraph.classes().all(|c| !c.data.clash),
@@ -242,5 +242,26 @@ impl CostFunction<Core> for Cost {
             _ => 1,
         };
         n.children().iter().fold(own, |acc, &c| acc.saturating_add(costs(c)))
+    }
+}
+
+/// The value a term spells: a stand-in for a declared or widened answer, which the graph
+/// judges by its type, writes as the answer it wraps.
+fn exact(term: &RecExpr<Core>) -> RecExpr<Core> {
+    use egg::Language;
+    let declared = crate::core::Utf16::new("declared".encode_utf16());
+    let mut out = RecExpr::default();
+    let mut map: Vec<Id> = Vec::with_capacity(term.as_ref().len());
+    for node in term.as_ref() {
+        let id = match node {
+            Core::Dyn(children) if children.len() == 3 && matches!(term[children[0]], Core::Str(s) if s == declared) => map[usize::from(children[2])],
+            node => out.add(node.clone().map_children(|c| map[usize::from(c)])),
+        };
+        map.push(id);
+    }
+    // The root is the last node; a wrapper the root was is gone, so build from its answer.
+    match map.last() {
+        Some(&root) => out[root].build_recexpr(|id| out[id].clone()),
+        None => out,
     }
 }

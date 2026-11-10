@@ -311,6 +311,12 @@ impl<'a> Lowerer<'a, '_> {
     }
     /// JavaScript truthiness of a value that is not a split.
     pub fn truthy(&mut self, v: Val<'a>) -> Val<'a> {
+        // A declared or widened answer's truth is its exact value's.
+        if let Val::Term(id, _) = &v
+            && let Some(exact) = self.exact.get(id).cloned()
+        {
+            return self.truthy(exact);
+        }
         self.consume(&v);
         match v {
             Val::Undef | Val::NaN => Val::Bool(false),

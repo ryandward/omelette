@@ -91,6 +91,18 @@ pub fn kind(ty: Declared, used: Option<Kind>) -> Kind {
     }
 }
 
+/// What a value of a declared type is, as far as tags tell: a literal, one of several forms,
+/// a record of forms, or any value of a shape.
+pub enum Form {
+    Str(crate::core::Utf16),
+    Num(i64),
+    Bool(bool),
+    Undef,
+    Union(Vec<Form>),
+    Record(Vec<(crate::core::Utf16, Form)>),
+    Any(Shape),
+}
+
 /// The types a program names: its aliases and interfaces, which a reference resolves to.
 pub struct Types<'t, 'a> {
     named: HashMap<&'t str, Named<'t, 'a>>,
@@ -147,6 +159,51 @@ impl<'t, 'a> Types<'t, 'a> {
         let items = self.elements(t);
         self.open.borrow_mut().pop();
         Some(items)
+    }
+    /// The form of a value of type `t`: its literals and tagged records kept, anything else a
+    /// value of its shape.
+    pub fn form(&self, t: &TSType<'_>) -> Form {
+        match t {
+            TSType::TSLiteralType(l) => match &l.literal {
+                TSLiteral::StringLiteral(s) => Form::Str(crate::core::Utf16::new(s.value.encode_utf16())),
+                TSLiteral::BooleanLiteral(b) => Form::Bool(b.value),
+                TSLiteral::NumericLiteral(n) => super::expr::integer(n.value).map_or(Form::Any(Shape::NUM), Form::Num),
+                _ => Form::Any(self.shape(t).unwrap_or(Shape::ALL)),
+            },
+            TSType::TSUndefinedKeyword(_) | TSType::TSVoidKeyword(_) => Form::Undef,
+            TSType::TSUnionType(u) => Form::Union(u.types.iter().map(|t| self.form(t)).collect()),
+            TSType::TSParenthesizedType(p) => self.form(&p.type_annotation),
+            TSType::TSTypeOperatorType(o) if o.operator == TSTypeOperatorOperator::Readonly => self.form(&o.type_annotation),
+            TSType::TSTypeLiteral(l) => self.record(&l.members).unwrap_or_else(|| Form::Any(members(&l.members))),
+            TSType::TSTypeReference(r) if r.type_arguments.is_none() && name(&r.type_name).is_some_and(|n| self.named.contains_key(n)) => {
+                let Some((&key, named)) = name(&r.type_name).and_then(|n| self.named.get_key_value(n)) else { return Form::Any(Shape::ALL) };
+                if self.open.borrow().contains(&key) {
+                    return Form::Any(Shape::ALL);
+                }
+                self.open.borrow_mut().push(key);
+                let form = match *named {
+                    Named::Alias(t) => self.form(t),
+                    Named::Interface(signatures) => self.record(signatures).unwrap_or_else(|| Form::Any(members(signatures))),
+                };
+                self.open.borrow_mut().pop();
+                form
+            }
+            _ => Form::Any(self.shape(t).unwrap_or(Shape::ALL)),
+        }
+    }
+    /// An object type's form: a record of its named properties' forms, an optional one
+    /// possibly undefined. `None` for one with a call, construct, or index signature.
+    fn record(&self, signatures: &[TSSignature<'_>]) -> Option<Form> {
+        let mut fields = Vec::new();
+        for signature in signatures {
+            let TSSignature::TSPropertySignature(p) = signature else { return None };
+            let name = p.key.static_name();
+            let name = name.as_ref().and_then(|n| n.as_str())?;
+            let form = p.type_annotation.as_ref().map_or(Form::Any(Shape::ALL), |a| self.form(&a.type_annotation));
+            let form = if p.optional { Form::Union(vec![form, Form::Undef]) } else { form };
+            fields.push((crate::core::Utf16::new(name.encode_utf16()), form));
+        }
+        Some(Form::Record(fields))
     }
     fn declaration(&self, t: &TSType<'_>) -> Result<Declared, String> {
         Ok(match self.elements(t)? {

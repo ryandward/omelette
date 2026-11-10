@@ -51,11 +51,11 @@ impl<'a> Lowerer<'a, '_> {
                 self.read(object, index)
             }
             Expression::ArrowFunctionExpression(f) if !f.r#async => match arrow_body(f) {
-                Some(body) => self.closure(&f.params, body),
+                Some(body) => self.closure(&f.params, body, f.return_type.as_ref().map(|t| &t.type_annotation)),
                 None => self.unsupported(),
             },
             Expression::FunctionExpression(f) if !f.r#async && !f.generator && f.id.is_none() => match &f.body {
-                Some(b) => self.closure(&f.params, Body::Block(b)),
+                Some(b) => self.closure(&f.params, Body::Block(b), f.return_type.as_ref().map(|t| &t.type_annotation)),
                 None => self.unsupported(),
             },
             Expression::CallExpression(c) if !c.optional => self.call(c),
@@ -78,9 +78,9 @@ impl<'a> Lowerer<'a, '_> {
         self.clobber();
         Val::Term(self.b.unsupported(), Ty::Any)
     }
-    pub fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>) -> Val<'a> {
+    pub fn closure(&mut self, params: &'a oxc_ast::ast::FormalParameters<'a>, body: Body<'a>, ret: Option<&'a oxc_ast::ast::TSType<'a>>) -> Val<'a> {
         let env = self.env.clone();
-        Val::Fun(Rc::new(Fun { params, body, env }))
+        Val::Fun(Rc::new(Fun { params, body, env, ret }))
     }
     fn ident(&mut self, id: &IdentifierReference<'_>) -> Val<'a> {
         match self.scoping.get_reference(id.reference_id()).symbol_id() {

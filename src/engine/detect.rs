@@ -143,15 +143,13 @@ fn judge(g: &Graph, ctx: &Context, group: &[Witness], found: &mut Findings) {
     if swallowing.is_empty() {
         return;
     }
-    match observation(g, group) {
-        Some(true) => return,
-        // The branch ignores this read's element but reads the same list another way, which
-        // may be the same element.
-        Some(false) => {
-            found.possible = true;
-            return;
-        }
-        None => {}
+    // A branch that ignores the element still answers: where its answer may be the
+    // replacement, the missing read collides with it, so only apartness makes it honest. One
+    // that avoids the element only by reading the same list another way may read that very
+    // element, so it is undecided.
+    if observation(g, group) == Some(false) {
+        found.possible = true;
+        return;
     }
     // An unknown function or value may make the branch ignore the element (`p = () => false`)
     // or test its presence (`p = () => true`, or `n === x` with `x` undefined).
@@ -389,7 +387,9 @@ impl Apart<'_> {
                 return true;
             }
         }
-        zd.constant.as_ref().zip(bd.constant.as_ref()).is_some_and(|(c, d)| c != d)
+        // Literals are tags; `NaN` is a number, not a literal type.
+        let tag = |c: &Const| matches!(c, Const::Str(_) | Const::Int(_) | Const::Bool(_) | Const::Undef);
+        zd.constant.as_ref().zip(bd.constant.as_ref()).is_some_and(|(c, d)| tag(c) && tag(d) && c != d)
     }
 }
 

@@ -74,7 +74,14 @@ impl<'a> Lowerer<'a, '_> {
         let out = if self.bind_params(f, args) { self.body(f.body) } else { self.unsupported() };
         self.depth -= 1;
         self.env = saved;
-        out
+        // A declared return type governs what the function answers.
+        match f.ret {
+            Some(ty) => {
+                let form = self.types.form(ty);
+                self.declared(out, &form)
+            }
+            None => out,
+        }
     }
     /// Bind each parameter to its argument; a missing argument is undefined.
     fn bind_params(&mut self, f: &Fun<'a>, args: Vec<Val<'a>>) -> bool {
@@ -137,7 +144,7 @@ impl<'a> Lowerer<'a, '_> {
                 && let Some(id) = &f.id
                 && let Some(block) = &f.body
             {
-                let helper = self.closure(&f.params, Body::Block(block));
+                let helper = self.closure(&f.params, Body::Block(block), f.return_type.as_ref().map(|t| &t.type_annotation));
                 self.defined.insert(id.symbol_id(), helper);
             }
         }

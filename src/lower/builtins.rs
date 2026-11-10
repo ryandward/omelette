@@ -5,7 +5,7 @@ use super::Lowerer;
 use super::expr::integer;
 use super::ops::Bin;
 use super::value::{Builtin, RefKey, Ty, Val};
-use crate::core::{Family, Shape, Utf16};
+use crate::core::{Core, Family, Shape, Utf16};
 
 /// The largest integer a double holds exactly.
 const SAFE: i64 = 9_007_199_254_740_991;
@@ -210,6 +210,72 @@ impl<'a> Lowerer<'a, '_> {
             v if nested || self.shape(&v).within(Shape::BOOL.or(Shape::NUM).or(Shape::STR).or(Shape::LIST)) => self.shaped("json", &[&v], Ty::Str, Shape::STR),
             // A function, or an object whose `toJSON` returns `undefined`, writes nothing.
             v => self.shaped("json", &[&v], Ty::Any, Shape::STR.or(Shape::UNDEF)),
+        }
+    }
+}
+
+impl<'a> Lowerer<'a, '_> {
+    /// A function's answer judged by the type it declares: in each world, a stand-in that is
+    /// one of the type's literals, a record of its tags, or a primitive of its type, and that
+    /// depends on the answer, so a branch that answers still depends on what it read. An
+    /// answer of an array, object, or function type, or one holding an array with identity,
+    /// stays as it is: those are no tags, and their identity matters.
+    pub fn declared(&mut self, answer: Val<'a>, form: &super::declare::Form) -> Val<'a> {
+        self.lift(answer, Family::Propagate, &mut |l, v| match v {
+            Val::Throw => Val::Throw,
+            v if super::refs::holds_ref(&v) || matches!(v, Val::Fun(_) | Val::Builtin(_)) => v,
+            v => l.stand_in(&v, form, 0),
+        })
+    }
+    fn stand_in(&mut self, answer: &Val<'a>, form: &super::declare::Form, tag: i64) -> Val<'a> {
+        use super::declare::Form;
+        match form {
+            Form::Str(s) => Val::Str(*s),
+            Form::Num(n) => Val::int(*n),
+            Form::Bool(b) => Val::Bool(*b),
+            Form::Undef => Val::Undef,
+            // An array, an object, or a function is no tag, and someone else may hold it: the
+            // answer stays itself.
+            Form::Any(shape) if shape.meets(Shape::LIST.or(Shape::OBJ).or(Shape::FUN)) => answer.clone(),
+            Form::Any(shape) => {
+                let stand_in = self.shaped("declared", &[answer], Ty::of(*shape), *shape);
+                self.remember(&stand_in, answer);
+                stand_in
+            }
+            // One of the forms, chosen by tests on the answer that lowering does not decide.
+            Form::Union(forms) => {
+                let Some((last, rest)) = forms.split_last() else { return Val::Throw };
+                let mut out = self.stand_in(answer, last, tag * 8 + 7);
+                for (k, f) in rest.iter().enumerate().rev() {
+                    let which = Val::int(tag * 8 + i64::try_from(k).unwrap_or(0));
+                    let test = self.shaped("is", &[answer, &which], Ty::Bool, Shape::BOOL);
+                    let arm = self.stand_in(answer, f, tag * 8 + i64::try_from(k).unwrap_or(0) + 1);
+                    out = self.select(&test, arm, out);
+                }
+                self.remember(&out, answer);
+                out
+            }
+            // The type's named fields, each a stand-in for the answer's field.
+            Form::Record(fields) => {
+                let mut children = Vec::with_capacity(fields.len() * 2);
+                for (name, f) in fields {
+                    let key = Val::Str(*name);
+                    let field = self.shaped("field", &[answer, &key], Ty::Any, Shape::ALL);
+                    let value = self.stand_in(&field, f, tag);
+                    children.push(self.b.add(Core::Str(*name)));
+                    children.push(self.emit(&value));
+                }
+                let stand_in = Val::Term(self.b.add(Core::Obj(children.into())), Ty::Defined);
+                self.remember(&stand_in, answer);
+                stand_in
+            }
+        }
+    }
+    /// A stand-in's exact answer, which decides control flow: the type judges what the
+    /// answer can be, but the program still does what the value says.
+    fn remember(&mut self, stand_in: &Val<'a>, answer: &Val<'a>) {
+        if let Val::Term(id, _) = stand_in {
+            self.exact.insert(*id, answer.clone());
         }
     }
 }

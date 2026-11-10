@@ -185,6 +185,8 @@ pub struct Fun<'a> {
     pub params: &'a FormalParameters<'a>,
     pub body: Body<'a>,
     pub env: Env<'a>,
+    /// The type the function declares it returns, which governs its answers.
+    pub ret: Option<&'a oxc_ast::ast::TSType<'a>>,
 }
 
 #[derive(Clone, Copy)]

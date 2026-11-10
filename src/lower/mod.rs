@@ -70,6 +70,7 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .map(|p| SemanticBuilder::new().with_build_nodes(true).build(p).semantic)
         .collect();
     let ambient: Vec<_> = programs.iter().map(|p| declare::ambient(p)).collect();
+    let types: Vec<_> = programs.iter().map(declare::Types::of).collect();
     let mut kinds = HashMap::new();
     for (semantic, ambient) in semantics.iter().zip(&ambient) {
         usage::classify(semantic, ambient, &mut kinds);
@@ -81,8 +82,9 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .iter()
         .zip(&semantics)
         .zip(&ambient)
-        .map(|((program, semantic), ambient)| {
-            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, &declared);
+        .zip(&types)
+        .map(|(((program, semantic), ambient), types)| {
+            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, &declared, types);
             lowerer.ambient = ambient.iter().map(|(_, symbol)| *symbol).collect();
             let value = lowerer.module(&program.body);
             let root = lowerer.emit(&value);
@@ -127,6 +129,11 @@ pub struct Lowerer<'a, 'l> {
     declared: &'l HashMap<String, Declared>,
     /// The variables `declare const` names: inputs, though the program binds them.
     ambient: std::collections::HashSet<oxc_semantic::SymbolId>,
+    /// Each stand-in for a declared or widened answer, with the exact answer, which control
+    /// flow still follows.
+    exact: HashMap<Id, Val<'a>>,
+    /// The types the program names, through which a declared return type resolves.
+    types: &'l declare::Types<'l, 'a>,
     /// The helpers the program defines before its expression, which any code may call.
     defined: HashMap<oxc_semantic::SymbolId, Val<'a>>,
     env: Env<'a>,
@@ -171,14 +178,16 @@ pub struct Lowerer<'a, 'l> {
     resolved: HashMap<value::RefKey, Val<'a>>,
 }
 
-impl<'l> Lowerer<'_, 'l> {
-    fn new(scoping: &'l Scoping, kinds: &'l HashMap<String, Kind>, declared: &'l HashMap<String, Declared>) -> Self {
+impl<'a, 'l> Lowerer<'a, 'l> {
+    fn new(scoping: &'l Scoping, kinds: &'l HashMap<String, Kind>, declared: &'l HashMap<String, Declared>, types: &'l declare::Types<'l, 'a>) -> Self {
         Self {
             b: Builder::default(),
             scoping,
             kinds,
             declared,
             ambient: std::collections::HashSet::new(),
+            types,
+            exact: HashMap::new(),
             defined: HashMap::new(),
             env: Env::new(),
             narrow: HashMap::new(),
