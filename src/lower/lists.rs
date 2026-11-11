@@ -178,16 +178,19 @@ impl<'a> Lowerer<'a, '_> {
 impl<'a> Lowerer<'a, '_> {
     /// `object.name`: reading any property of undefined throws; of the rest only `length`
     /// is modeled.
-    pub fn property(&mut self, object: Val<'a>, name: &str) -> Val<'a> {
+    pub fn property(&mut self, object: Val<'a>, name: &'a str) -> Val<'a> {
         self.lift(object, Family::Propagate, &mut |l, v| match v {
             Val::Undef | Val::Throw => Val::Throw,
             v => {
                 l.consume(&v);
                 match v {
-                    Val::Record(fields) => l.field(&fields, Utf16::new(name.encode_utf16())),
+                    Val::Record(fields) => {
+                        let name = l.spelled(name);
+                        l.field(&fields, name)
+                    }
                     // A value of unknown type may hold any value there, or none.
                     Val::Term(_, Ty::Defined | Ty::Any) if name != "length" => {
-                        let key = Val::Str(Utf16::new(name.encode_utf16()));
+                        let key = Val::Str(l.spelled(name));
                         l.dynamic("prop", &[&v, &key], Ty::Any)
                     }
                     v if name == "length" => l.length(v),
@@ -203,7 +206,7 @@ impl<'a> Lowerer<'a, '_> {
             return value.clone();
         }
         let inherited = ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString", "constructor", "__proto__"];
-        if inherited.iter().any(|n| Utf16::new(n.encode_utf16()) == name) { self.unsupported() } else { Val::Undef }
+        if inherited.iter().any(|n| Utf16::name(n) == name) { self.unsupported() } else { Val::Undef }
     }
     /// `v.length`: an integer for lists and strings, undefined for numbers and booleans, and
     /// possibly undefined for a value of unknown type.

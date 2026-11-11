@@ -29,7 +29,10 @@ impl<'a> Lowerer<'a, '_> {
             Expression::TSSatisfiesExpression(t) => self.expr(&t.expression),
             Expression::TSNonNullExpression(t) => self.expr(&t.expression),
             Expression::NumericLiteral(n) => integer(n.value).map_or_else(|| self.unsupported(), Val::int),
-            Expression::StringLiteral(s) => Val::Str(Utf16::new(s.value.encode_utf16())),
+            Expression::StringLiteral(s) => Val::Str(match s.value.as_str() {
+                Some(text) => self.spelled(text),
+                None => Utf16::new(s.value.encode_utf16()),
+            }),
             Expression::BooleanLiteral(b) => Val::Bool(b.value),
             Expression::TemplateLiteral(t) => self.template(t),
             Expression::Identifier(id) => self.ident(id),
@@ -163,10 +166,14 @@ impl<'a> Lowerer<'a, '_> {
         }
     }
     fn template(&mut self, t: &'a TemplateLiteral<'a>) -> Val<'a> {
-        let mut out = Val::Str(Utf16::new([]));
+        let mut out = Val::Str(Utf16::name(""));
         for (i, quasi) in t.quasis.iter().enumerate() {
             let Some(cooked) = &quasi.value.cooked else { return self.unsupported() };
-            out = self.binary(Bin::Add, out, Val::Str(Utf16::new(cooked.encode_utf16())));
+            let piece = match cooked.as_str() {
+                Some(text) => self.spelled(text),
+                None => Utf16::new(cooked.encode_utf16()),
+            };
+            out = self.binary(Bin::Add, out, Val::Str(piece));
             if let Some(e) = t.expressions.get(i) {
                 let v = self.expr(e);
                 out = self.binary(Bin::Add, out, v);

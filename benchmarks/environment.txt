@@ -1,7 +1,7 @@
 CPU: Intel Core i7-8700K @ 3.70GHz, 6 cores / 12 threads
 OS: Linux x86_64
 Build: cargo release defaults, no target-cpu override
-Protocol: 5 warmups per expression, 500 interleaved samples for each of 220 cases (154 absence, 66 mutation)
+Protocol: 5 warmups per expression, 500 interleaved samples for each of 222 cases (156 absence, 66 mutation)
 Command: cargo run --release --example latency -- 500 --check
 Timing: std::time::Instant; fresh parser arena and e-graph on every evaluation
 End-to-end: parse, semantic analysis, lowering, construct graph (value and effect log), saturate, consistency, both verdicts, extraction, graph disposal

@@ -4,7 +4,7 @@ use super::Lowerer;
 use super::value::{Items, RefKey, Split, Ty, Val};
 use crate::core::{Core, Family, Kind, Mutator};
 use egg::Id;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
 /// What lowering has learned along one path: each written reference's current contents, who
@@ -383,7 +383,7 @@ impl<'a> Lowerer<'a, '_> {
             cells.insert(key, merged);
         }
         let keys: HashSet<RefKey> = a.escaped.keys().chain(b.escaped.keys()).copied().collect();
-        let mut escaped = HashMap::new();
+        let mut escaped = HashMap::default();
         for key in keys {
             let (x, y) = (self.holder(&a, key), self.holder(&b, key));
             let merged = if x.identical(&y) { x } else { self.join(join, x, y) };

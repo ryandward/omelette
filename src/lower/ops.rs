@@ -368,7 +368,7 @@ impl<'a> Lowerer<'a, '_> {
         }
     }
     pub fn to_text(&mut self, v: Val<'a>) -> Val<'a> {
-        let text = |s: &str| Val::Str(Utf16::new(s.encode_utf16()));
+        let text = |s: &'static str| Val::Str(Utf16::name(s));
         // An array being written already writes as empty text where it holds itself, as
         // engines join a cyclic array.
         if let Val::Ref(key) = v {
@@ -388,10 +388,10 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef => text("undefined"),
             Val::NaN => text("NaN"),
             Val::Bool(b) => text(if b { "true" } else { "false" }),
-            Val::Num(ref f) if f.known().is_some() => text(&f.constant.to_string()),
+            Val::Num(ref f) if f.known().is_some() => Val::Str(Utf16::new(f.constant.to_string().encode_utf16())),
             // A record writes as the text every plain object does, unless it says otherwise.
             Val::Record(ref fields) => {
-                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::new(n.encode_utf16())));
+                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::name(n)));
                 if own { self.unsupported() } else { text("[object Object]") }
             }
             // A list's text is its elements joined by commas.
@@ -428,15 +428,7 @@ impl<'a> Lowerer<'a, '_> {
         if args.iter().any(|a| nested_read(a)) {
             self.opaque = true;
         }
-        // An operation's name is one of a few, each interned once.
-        let named = if let Some(&id) = self.names.get(name) {
-            id
-        } else {
-            let id = self.b.text(Utf16::new(name.encode_utf16()));
-            self.names.insert(name, id);
-            id
-        };
-        let mut children = vec![named, self.b.add(Core::Kinds(shape))];
+        let mut children = vec![self.b.text(Utf16::name(name)), self.b.add(Core::Kinds(shape))];
         children.extend(args.iter().map(|v| self.emit(v)));
         let node = if shape.meets(Shape::UNDEF) { Core::DynUndef(children.into()) } else { Core::Dyn(children.into()) };
         Val::Term(self.b.add(node), ty)

@@ -448,7 +448,7 @@ impl<'a> Lowerer<'a, '_> {
     /// The separator `join` writes: a comma where the argument is undefined, which writes a
     /// default for a separator that may be missing.
     fn separator(&mut self, sep: Option<Val<'a>>) -> Val<'a> {
-        let comma = Val::Str(crate::core::Utf16::new(",".encode_utf16()));
+        let comma = Val::Str(crate::core::Utf16::name(","));
         match sep {
             None => comma,
             Some(v) => self.lift(v, Family::Default, &mut |l, v| match v {

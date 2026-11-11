@@ -91,13 +91,22 @@ pub struct Utf16(Symbol);
 impl Utf16 {
     pub fn new(units: impl IntoIterator<Item = u16>) -> Self {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut key = String::from("utf16:");
+        let units = units.into_iter();
+        let mut key = String::with_capacity("utf16:".len() + 4 * units.size_hint().0);
+        key.push_str("utf16:");
         for u in units {
             for shift in [12, 8, 4, 0] {
                 key.push(char::from(HEX[usize::from((u >> shift) & 0xf)]));
             }
         }
         Self(Symbol::from(key))
+    }
+    /// A name the code itself spells, such as an operation's, encoded once per thread.
+    pub fn name(name: &'static str) -> Self {
+        thread_local! {
+            static NAMES: std::cell::RefCell<rustc_hash::FxHashMap<&'static str, Utf16>> = std::cell::RefCell::default();
+        }
+        NAMES.with_borrow_mut(|names| *names.entry(name).or_insert_with(|| Self::new(name.encode_utf16())))
     }
     pub fn units(self) -> Vec<u16> {
         let hex = &self.0.as_str()["utf16:".len()..];

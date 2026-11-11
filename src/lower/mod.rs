@@ -12,7 +12,7 @@ mod refs;
 mod usage;
 mod value;
 
-use crate::core::{Core, Kind};
+use crate::core::{Core, Kind, Utf16};
 use build::Builder;
 use egg::{Id, RecExpr};
 use oxc_allocator::Allocator;
@@ -20,6 +20,7 @@ use oxc_ast::ast::{Program, Statement};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::SourceType;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use declare::Declared;
 use value::{Env, Val};
@@ -128,31 +129,31 @@ pub struct Lowerer<'a, 'l> {
     /// What declarations say the free variables hold.
     declared: &'l HashMap<String, Declared>,
     /// The variables `declare const` names: inputs, though the program binds them.
-    ambient: std::collections::HashSet<oxc_semantic::SymbolId>,
+    ambient: FxHashSet<oxc_semantic::SymbolId>,
     /// Each stand-in for a declared or widened answer, with the exact answer, which control
     /// flow still follows.
-    exact: HashMap<Id, Val<'a>>,
-    /// The node naming each kind of `dyn` operation.
-    names: HashMap<&'static str, Id>,
+    exact: FxHashMap<Id, Val<'a>>,
+    /// Each string the source spells, as text.
+    texts: FxHashMap<&'a str, Utf16>,
     /// Each declared return type's form, by the type's address in the program.
-    forms: HashMap<usize, std::rc::Rc<declare::Form>>,
+    forms: FxHashMap<usize, std::rc::Rc<declare::Form>>,
     /// The types the program names, through which a declared return type resolves.
     types: &'l declare::Types<'l, 'a>,
     /// The helpers the program defines before its expression, which any code may call.
-    defined: HashMap<oxc_semantic::SymbolId, Val<'a>>,
+    defined: FxHashMap<oxc_semantic::SymbolId, Val<'a>>,
     env: Env<'a>,
     /// Reads whose presence a branch has decided: absent, or the element.
-    narrow: HashMap<Id, Val<'a>>,
+    narrow: FxHashMap<Id, Val<'a>>,
     /// The element binder of every read, so all splits on one read agree.
-    elems: HashMap<Id, Id>,
+    elems: FxHashMap<Id, Id>,
     /// Each walker index binder, with the list it ranges over.
-    coords: HashMap<Id, Id>,
+    coords: FxHashMap<Id, Id>,
     /// Each element binder, with the list it is an element of.
-    members: HashMap<Id, Id>,
+    members: FxHashMap<Id, Id>,
     /// Mapped lists whose callback builds a new array for every element.
-    fresh: std::collections::HashSet<Id>,
+    fresh: FxHashSet<Id>,
     /// Mapped lists whose callback returns its element.
-    passes: std::collections::HashSet<Id>,
+    passes: FxHashSet<Id>,
     /// Whether the last walker callback lowered returned an array it built.
     built: bool,
     /// Whether the last walker callback lowered returned its element.
@@ -160,7 +161,7 @@ pub struct Lowerer<'a, 'l> {
     /// The lists whose walkers' callbacks are being lowered: each is non-empty there.
     walking: Vec<Id>,
     /// Each mapped list, with what reading its elements needs.
-    maps: HashMap<Id, value::Mapping<'a>>,
+    maps: FxHashMap<Id, value::Mapping<'a>>,
     depth: usize,
     /// See [`Lowered::opaque`].
     opaque: bool,
@@ -177,9 +178,9 @@ pub struct Lowerer<'a, 'l> {
     /// The references being resolved into a term, innermost last.
     resolving: Vec<value::RefKey>,
     /// The references whose contents some term holds.
-    embedded: std::collections::HashSet<value::RefKey>,
+    embedded: FxHashSet<value::RefKey>,
     /// Each reference's contents, resolved, during one emission.
-    resolved: HashMap<value::RefKey, Val<'a>>,
+    resolved: FxHashMap<value::RefKey, Val<'a>>,
 }
 
 impl<'a, 'l> Lowerer<'a, 'l> {
@@ -189,23 +190,23 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             scoping,
             kinds,
             declared,
-            ambient: std::collections::HashSet::new(),
+            ambient: FxHashSet::default(),
             types,
-            exact: HashMap::new(),
-            forms: HashMap::new(),
-            names: HashMap::new(),
-            defined: HashMap::new(),
-            env: Env::new(),
-            narrow: HashMap::new(),
-            elems: HashMap::new(),
-            coords: HashMap::new(),
-            members: HashMap::new(),
-            fresh: std::collections::HashSet::new(),
-            passes: std::collections::HashSet::new(),
+            exact: FxHashMap::default(),
+            forms: FxHashMap::default(),
+            texts: FxHashMap::default(),
+            defined: FxHashMap::default(),
+            env: Env::default(),
+            narrow: FxHashMap::default(),
+            elems: FxHashMap::default(),
+            coords: FxHashMap::default(),
+            members: FxHashMap::default(),
+            fresh: FxHashSet::default(),
+            passes: FxHashSet::default(),
             built: false,
             passed: false,
             walking: Vec::new(),
-            maps: HashMap::new(),
+            maps: FxHashMap::default(),
             depth: 0,
             opaque: false,
             state: refs::State::new(),
@@ -214,8 +215,12 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             this: None,
             joining: Vec::new(),
             resolving: Vec::new(),
-            embedded: std::collections::HashSet::new(),
-            resolved: HashMap::new(),
+            embedded: FxHashSet::default(),
+            resolved: FxHashMap::default(),
         }
+    }
+    /// A string the source spells, as text, encoded once however often lowering visits it.
+    fn spelled(&mut self, s: &'a str) -> Utf16 {
+        *self.texts.entry(s).or_insert_with(|| Utf16::new(s.encode_utf16()))
     }
 }

@@ -514,5 +514,5 @@ fn mutator(g: &Graph, op: Id) -> Option<Mutator> {
 /// Whether a `dyn` node's name is `oneof`: a declared union of the alternatives after its
 /// answer.
 fn oneof(g: &Graph, name: Id) -> bool {
-    matches!(&g[name].data.constant, Some(Const::Str(s)) if *s == crate::core::Utf16::new("oneof".encode_utf16()))
+    matches!(&g[name].data.constant, Some(Const::Str(s)) if *s == crate::core::Utf16::name("oneof"))
 }

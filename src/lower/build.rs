@@ -4,7 +4,6 @@ use crate::affine::Form;
 use crate::core::{Core, Kind, Known, Shape, Utf16, Variable, items_of, shape_of};
 use egg::{Id, Language, RecExpr, Symbol};
 
-#[derive(Default)]
 pub struct Builder {
     out: RecExpr<Core>,
     /// Every node added, for sharing; hashed fast, since nodes are small and many.
@@ -12,6 +11,19 @@ pub struct Builder {
     fresh: u32,
     /// Each term's shape and, for a list, its elements' shape, as the analysis computes them.
     facts: Vec<(Shape, Shape)>,
+}
+
+impl Default for Builder {
+    /// Room for what a typical expression lowers to, so the tables do not grow while it does.
+    fn default() -> Self {
+        const ROOM: usize = 128;
+        Self {
+            out: RecExpr::from(Vec::with_capacity(ROOM)),
+            intern: rustc_hash::FxHashMap::with_capacity_and_hasher(ROOM, rustc_hash::FxBuildHasher),
+            fresh: 0,
+            facts: Vec::with_capacity(ROOM),
+        }
+    }
 }
 
 impl Known for Builder {
@@ -173,8 +185,8 @@ impl Builder {
         either(taken(true, yes), taken(false, no))
     }
     /// Whether a `dyn` node's name is `name`.
-    fn named(&self, children: &[Id], name: &str) -> bool {
-        children.first().is_some_and(|&n| matches!(self.out[n], Core::Str(s) if s == Utf16::new(name.encode_utf16())))
+    fn named(&self, children: &[Id], name: &'static str) -> bool {
+        children.first().is_some_and(|&n| matches!(self.out[n], Core::Str(s) if s == Utf16::name(name)))
     }
     /// `i === k` as lowering writes an integer equality, `0 <= i - k` and `0 <= k - i`: `k`.
     fn equality(&self, id: Id, i: Id) -> Option<Form> {
@@ -235,8 +247,30 @@ impl Builder {
     pub fn mentions(&self, id: Id, var: Id) -> bool {
         id == var || self.out[id].children().iter().any(|&c| self.mentions(c, var))
     }
+    /// The terms `root` reaches, in the order they were added. A node is added after its
+    /// children and only once, so each kept node follows its children, `root` comes last, and
+    /// nothing needs sharing again.
     pub fn finish(&self, root: Id) -> RecExpr<Core> {
-        self.out[root].build_recexpr(|id| self.out[id].clone())
+        let nodes = &self.out.as_ref()[..=usize::from(root)];
+        let mut reached = vec![false; nodes.len()];
+        reached[nodes.len() - 1] = true;
+        for (i, node) in nodes.iter().enumerate().rev() {
+            if reached[i] {
+                for &c in node.children() {
+                    reached[usize::from(c)] = true;
+                }
+            }
+        }
+        // Each node's place among the kept nodes before it, which a kept child takes.
+        let mut place = Vec::with_capacity(nodes.len());
+        let mut kept = Vec::new();
+        for (node, &live) in nodes.iter().zip(&reached) {
+            place.push(Id::from(kept.len()));
+            if live {
+                kept.push(node.clone().map_children(|c| place[usize::from(c)]));
+            }
+        }
+        RecExpr::from(kept)
     }
 }
 

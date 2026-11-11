@@ -5,7 +5,7 @@ use super::expr::Arm;
 use super::ops::Bin;
 use super::value::{Items, Seq, Ty, Val};
 use crate::affine::Form;
-use crate::core::{Core, Family, Mutator, Utf16};
+use crate::core::{Core, Family, Mutator};
 use oxc_ast::ast::{AssignmentExpression, AssignmentTarget, Expression, SimpleAssignmentTarget, UpdateExpression};
 use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
 use std::rc::Rc;
@@ -245,7 +245,7 @@ impl<'a> Lowerer<'a, '_> {
         };
         let key = match key {
             Key::Index(k) => k,
-            Key::Name(name) => Val::Str(Utf16::new(name.encode_utf16())),
+            Key::Name(name) => Val::Str(self.spelled(name)),
         };
         self.strict(vec![object, key], &mut |l, mut vals| {
             let (object, key) = (vals.remove(0), vals.remove(0));
@@ -353,7 +353,7 @@ impl<'a> Lowerer<'a, '_> {
             (key, c) => {
                 let at = match key {
                     Key::Index(k) => k.clone(),
-                    Key::Name(name) => Val::Str(Utf16::new(name.encode_utf16())),
+                    Key::Name(name) => Val::Str(self.spelled(name)),
                 };
                 self.unknown_after(Mutator::Assign, &c, &[at, value.clone()])
             }

@@ -91,7 +91,7 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef | Val::Fun(_) | Val::Builtin(_) => Val::NaN,
             // A record's text is `[object Object]`, which is no number.
             Val::Record(fields) => {
-                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::new(n.encode_utf16())));
+                let own = ["toString", "valueOf"].iter().any(|n| fields.iter().any(|(k, _)| *k == Utf16::name(n)));
                 if own { self.unsupported() } else { Val::NaN }
             }
             Val::Bool(b) => Val::int(i64::from(b)),
@@ -158,7 +158,7 @@ impl<'a> Lowerer<'a, '_> {
         if key.is_some_and(|k| open.contains(&k)) {
             return Val::Throw;
         }
-        let text = |s: &str| Val::Str(Utf16::new(s.encode_utf16()));
+        let text = |s: &'static str| Val::Str(Utf16::name(s));
         match self.deref(v) {
             Val::Throw => Val::Throw,
             Val::Undef | Val::Fun(_) | Val::Builtin(_) if nested => text("null"),

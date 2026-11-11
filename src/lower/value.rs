@@ -4,7 +4,7 @@ use crate::core::{Family, Kind, Shape, Utf16};
 use egg::{Id, Symbol};
 use oxc_ast::ast::{Expression, FormalParameters, FunctionBody};
 use oxc_semantic::SymbolId;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::rc::Rc;
 
 /// What a symbolic term is known to be.

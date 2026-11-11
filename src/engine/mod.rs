@@ -249,7 +249,7 @@ impl CostFunction<Core> for Cost {
 /// judges by its type, writes as the answer it wraps.
 fn exact(term: &RecExpr<Core>) -> RecExpr<Core> {
     use egg::Language;
-    let declared = crate::core::Utf16::new("declared".encode_utf16());
+    let declared = crate::core::Utf16::name("declared");
     let mut out = RecExpr::default();
     let mut map: Vec<Id> = Vec::with_capacity(term.as_ref().len());
     for node in term.as_ref() {
