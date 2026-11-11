@@ -172,26 +172,27 @@ The verdicts concern this model, not general JavaScript safety.
 
 ## Latency
 
-[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 222 cases, the 156 absence cases and then the 66 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
+[benchmarks/latency.txt](benchmarks/latency.txt) records each case's parser, parser-plus-lowering, and total quantiles from a release run with 500 samples per case. [benchmarks/environment.txt](benchmarks/environment.txt) records the host (an Intel Core i7-8700K), the toolchain, the protocol, and the command. Each case gets five warmups; samples interleave all 241 cases, the 175 absence cases and then the 66 mutation cases, and each reparses the source and builds a new graph. Totals include dropping the graph.
 
 | Measurement | Result |
 | --- | ---: |
-| Worst per-case parser p95 | 4.7 us |
-| Worst per-case parser + semantic analysis + lowering p95 | 40.4 us |
-| Worst per-case total p95 / p99 | 362.8 / 522.0 us |
-| Largest total among 111,000 samples | 773.4 us |
-| Worst total p95: original / string / every / some cases | 362.8 / 281.6 / 127.2 / 144.1 us |
-| Worst total p95: unknown-callback / join and flat cases | 38.6 / 127.9 us |
-| Worst total p95: image-test and conversion / declared-type / catch, fold, and forEach cases | 256.8 / 98.4 / 143.2 us |
-| Worst total p95: pinned-walker, filtered-slot, and definition cases | 127.7 us |
-| Worst total p95: L's corpus of GenomeHub's shapes, and declared return types | 190.8 us |
-| Worst total p95: mutation cases | 241.7 us |
-| Two-element slice sum total p50 / p95 | 42.7 / 47.4 us |
+| Worst per-case parser p95 | 5.2 us |
+| Worst per-case parser + semantic analysis + lowering p95 | 47.4 us |
+| Worst per-case total p95 / p99 | 381.7 / 577.1 us |
+| Largest total among 120,500 samples | 676.6 us |
+| Worst total p95: original / string / every / some cases | 381.7 / 290.5 / 157.2 / 162.0 us |
+| Worst total p95: unknown-callback / join and flat cases | 45.6 / 137.3 us |
+| Worst total p95: image-test and conversion / declared-type / catch, fold, and forEach cases | 271.6 / 100.2 / 159.2 us |
+| Worst total p95: pinned-walker, filtered-slot, and definition cases | 150.0 us |
+| Worst total p95: L's corpus of GenomeHub's shapes, and declared return types | 198.2 us |
+| Worst total p95: folds that keep an element | 122.6 us |
+| Worst total p95: mutation cases | 253.4 us |
+| Two-element slice sum total p50 / p95 | 44.3 / 59.5 us |
 | All-case graph sizes / iterations | 1-76 / 1-8 |
-| One-time runtime initialization | 854.0 us |
-| First evaluation after initialization | 153.8 us |
+| One-time runtime initialization | 2506.5 us |
+| First evaluation after initialization | 822.6 us |
 
-The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's total p95 below 500 us and fewer than 150 e-nodes; the parser and lowering columns are reported, not checked. A timing on a busy host is partly the host's, so when the one-minute load average is not below 3.5 (on this host's 12 threads; another host gets the same share of its threads) before and after sampling, `--check` judges no latency and exits with status 2; the tests assert correctness and graph bounds without wall-clock thresholds.
+The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's total p95 below 500 us and fewer than 150 e-nodes; the parser and lowering columns are reported, not checked. A timing on a busy host is partly the host's, so unless other processes used less than one processor's worth of CPU while the samples were taken, as Linux's `/proc` counts it, `--check` judges no latency and exits with status 2. On this host, with other processes under 1.1 processors the worst case's p95 stayed between 397 and 438 us over 45 runs, and from 1.15 up it passed 500 us in most; the load average, which smooths a minute, did not predict it; the tests assert correctness and graph bounds without wall-clock thresholds.
 
 ## License
 

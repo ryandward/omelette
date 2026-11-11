@@ -3,8 +3,10 @@
 //!
 //! `--check` fails on a wrong verdict, an unsaturated or inconsistent graph, a graph of 150
 //! e-nodes or more, or, when the host was quiet, a case whose end-to-end p95 reaches the
-//! budget. On a busy host the timings are partly the host's, so it judges no latency: it
-//! prints why and exits with status 2.
+//! budget. Quiet means other processes used less than one processor's worth of CPU while the
+//! samples were taken, as Linux's `/proc` counts it. On a busier host, or one that does not
+//! say, the timings are partly the host's, so it judges no latency: it prints why and exits
+//! with status 2.
 use omelette::{engine, lower};
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -15,21 +17,46 @@ use std::time::Instant;
 /// The end-to-end p95, in microseconds, the project holds every case under.
 const TOTAL_P95_BUDGET_US: f64 = 500.0;
 
-/// The host's one-minute load average, where the system reports one.
-fn load() -> Option<f64> {
-    std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
+/// How many processors' worth of CPU other processes may use while the samples are taken for
+/// the timings to be the code's own. Calibrated on the benchmark host (12 threads) over 45 runs:
+/// with other processes under 1.1 processors the worst case's p95 stayed between 397 and
+/// 438 us, and from 1.15 up it passed 500 us in most runs. The load average does not show this:
+/// it smooths a minute, and a burst inside a run is enough to stretch the tail.
+const QUIET_BELOW_PROCESSORS: f64 = 1.0;
+
+/// CPU time spent so far, in clock ticks: by every processor of the machine, busy or idle, by
+/// them busy, and by this process.
+#[derive(Clone, Copy)]
+struct Ticks {
+    total: u64,
+    busy: u64,
+    own: u64,
 }
 
-/// The load below which timings on this host are the code's own. On the benchmark host,
-/// with 12 threads, p95s held steady below a load of 3.5 and doubled near 10; another host
-/// gets the same share of its threads.
-fn quiet_below() -> f64 {
-    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    3.5 / 12.0 * f64::from(u32::try_from(threads).unwrap_or(u32::MAX))
+/// The machine's and this process's CPU time, where the system reports them (Linux's `/proc`).
+fn ticks() -> Option<Ticks> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let cpu: Vec<u64> = stat.lines().next()?.split_whitespace().skip(1).map(|f| f.parse().ok()).collect::<Option<_>>()?;
+    // user, nice, system, idle, iowait, irq, softirq, steal; guest time is counted in user.
+    let total: u64 = cpu.iter().take(8).sum();
+    let idle = cpu.get(3)? + cpu.get(4)?;
+    // This process's fields after its name: utime and stime are the 12th and 13th.
+    let own = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields: Vec<u64> = own.rsplit_once(')')?.1.split_whitespace().skip(11).take(2).map(|f| f.parse().ok()).collect::<Option<_>>()?;
+    Some(Ticks { total, busy: total - idle, own: fields.iter().sum() })
 }
 
-fn shown(load: Option<f64>) -> String {
-    load.map_or_else(|| "unknown".to_string(), |l| format!("{l:.2}"))
+/// How many processors' worth of CPU everything but this process used between two readings;
+/// `None` where no time passed or the counts do not fit.
+fn others(before: Ticks, after: Ticks) -> Option<f64> {
+    let total = u32::try_from(after.total.checked_sub(before.total)?).ok().filter(|&t| t > 0)?;
+    let busy = after.busy.checked_sub(before.busy)?;
+    let own = after.own.checked_sub(before.own)?;
+    // This process's ticks are counted apart from the machine's, so over a window its own may
+    // exceed what the machine counted busy by a tick: nothing else ran then.
+    let busy = u32::try_from(busy.saturating_sub(own)).ok()?;
+    let threads = u32::try_from(std::thread::available_parallelism().ok()?.get()).ok()?;
+    Some(f64::from(busy) / f64::from(total) * f64::from(threads))
 }
 
 /// Samples per case: parsing alone, parsing through lowering, and the whole evaluation.
@@ -130,7 +157,7 @@ fn main() {
             black_box(engine::evaluate(case.src).ok());
         }
     }
-    let before = load();
+    let start = ticks();
     // Interleave inputs so later cases do not systematically receive a warmer CPU.
     let mut samples = vec![Samples::default(); cases.len()];
     for _ in 0..count.max(1) {
@@ -138,9 +165,10 @@ fn main() {
             sample(case.src, into);
         }
     }
-    let after = load();
-    let quiet = [before, after].into_iter().flatten().all(|l| l < quiet_below());
-    println!("host load: {} before sampling, {} after", shown(before), shown(after));
+    let contention = start.zip(ticks()).and_then(|(a, z)| others(a, z));
+    let shown = contention.map_or_else(|| "not measured".to_string(), |o| format!("{o:.2} processors"));
+    println!("other processes while sampling: {shown}");
+    let quiet = contention.is_some_and(|o| o < QUIET_BELOW_PROCESSORS);
     println!("case\tparse p50/p95 us\tlower p50/p95 us\ttotal p50/p95/p99/max us\tnodes\titers");
     let budget = quiet.then_some(TOTAL_P95_BUDGET_US);
     for (i, (case, into)) in cases.iter().zip(&mut samples).enumerate() {
@@ -148,10 +176,7 @@ fn main() {
     }
     if check && !quiet {
         eprintln!(
-            "undecided: the host's load was {} before sampling and {} after, not below {:.1}, so the {TOTAL_P95_BUDGET_US} us budget was not judged; rerun on a quiet host",
-            shown(before),
-            shown(after),
-            quiet_below()
+            "undecided: other processes used {shown} while sampling, not below {QUIET_BELOW_PROCESSORS:.1}, so the {TOTAL_P95_BUDGET_US} us budget was not judged; rerun on a quiet host"
         );
         std::process::exit(2);
     }
