@@ -166,3 +166,25 @@ no cheat	type Entry = { readonly name: string; readonly cardinality: number }; t
 # A declared return type governs; with none, TypeScript's inference does.
 CHEAT	const kindOf = (s: string): string => (s === 'q' ? 'continuous' : 'nominal'); kinds.slice(0, 1).map(kindOf).reduce((_, p) => p, 'none')
 no cheat	const kindOf = (s: string) => (s === 'q' ? 'continuous' : 'nominal'); kinds.slice(0, 1).map(kindOf).reduce((_, p) => p, 'none')
+# A fold whose answer, or a field of it, each step keeps or sets to the element keeps one
+# element: the seed stands for it where no step set it. `||` and `&&` of the element's booleans
+# are `some` and `every`, an aggregate, as a sum is.
+CHEAT	xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: 0 }).found
+no cheat	xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: undefined }).found
+CHEAT	declare const xs: string[]; xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: '' }).found
+no cheat	declare const xs: string[]; xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: 0 }).found
+no cheat	xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: 0 }).n
+UNDECIDED	JSON.stringify(xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : acc.found }), { n: 0, found: 0 }))
+CHEAT	xs.reduce((acc, x) => (acc.n === 3 ? { n: acc.n + 1, found: x } : { n: acc.n + 1, found: acc.found }), { n: 0, found: 0 }).found
+CHEAT	xs.reduce((acc, x) => ({ n: acc.n + 1, found: x }), { n: 0, found: 0 }).found
+CHEAT	xs.reduce((acc, x, i) => (i === 3 ? x : acc), 0)
+no cheat	declare const xs: string[]; xs.reduce((acc, x, i) => (i === 3 ? x : acc), 0)
+CHEAT	xs.reduce((m, x) => (x > m ? x : m), 0)
+CHEAT	xs.reduce((acc, x) => (acc === 0 ? x : acc), 0)
+no cheat	xs.reduce((acc, x, k) => (k === i ? (x > 0 ? 'pos' : 'neg') : acc), 'none')
+CHEAT	xs.reduce((acc, x, k) => (k === i ? (x > 0 ? 'pos' : 'neg') : acc), 'neg')
+UNDECIDED	xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x + acc.n : acc.found }), { n: 0, found: 0 }).found
+UNDECIDED	xs.reduce((acc, x) => ({ n: acc.n + 1, found: acc.n === 3 ? x : -1 }), { n: 0, found: 0 }).found
+no cheat	xs.reduce((acc, x) => acc || x > 3, false)
+no cheat	xs.reduce((acc, x) => ({ n: acc.n + 1, any: acc.any || x > 3 }), { n: 0, any: false }).any
+no cheat	xs.reduce((acc, x) => ({ n: acc.n + 1, total: acc.total + x }), { n: 0, total: 0 }).total

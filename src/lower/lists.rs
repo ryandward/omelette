@@ -183,6 +183,15 @@ impl<'a> Lowerer<'a, '_> {
             Val::Undef | Val::Throw => Val::Throw,
             v => {
                 l.consume(&v);
+                // A field of a fold's answer that keeps an element: the element, or the seed's.
+                if let Val::Term(id, _) = v
+                    && let Some(fields) = l.selections.get(&id).cloned()
+                {
+                    let name = l.spelled(name);
+                    if let Some((_, kept)) = fields.iter().find(|(n, _)| *n == name) {
+                        return kept.clone();
+                    }
+                }
                 match v {
                     Val::Record(fields) => {
                         let name = l.spelled(name);

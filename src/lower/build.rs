@@ -247,6 +247,79 @@ impl Builder {
     pub fn mentions(&self, id: Id, var: Id) -> bool {
         id == var || self.out[id].children().iter().any(|&c| self.mentions(c, var))
     }
+    /// Whether the term `id` mentions a term `which` picks out.
+    pub fn mentions_where(&self, id: Id, which: &dyn Fn(Id) -> bool) -> bool {
+        which(id) || self.out[id].children().iter().any(|&c| self.mentions_where(c, which))
+    }
+    /// The value a truthiness test reads.
+    pub fn truthy_of(&self, id: Id) -> Option<Id> {
+        match &self.out[id] {
+            Core::Dyn(children) | Core::DynUndef(children) if self.named(children, "truthy") => children.get(2).copied(),
+            _ => None,
+        }
+    }
+    /// A record literal's fields, by name; `None` for any other term.
+    pub fn fields(&self, id: Id) -> Option<Vec<(Utf16, Id)>> {
+        let Core::Obj(children) = &self.out[id] else { return None };
+        children
+            .chunks(2)
+            .map(|pair| match (pair, pair.first().map(|&n| &self.out[n])) {
+                ([_, value], Some(Core::Str(name))) => Some((*name, *value)),
+                _ => None,
+            })
+            .collect()
+    }
+    /// Whether `id` reads the field `name` of `object`.
+    pub fn is_field_of(&self, id: Id, object: Id, name: Utf16) -> bool {
+        match &self.out[id] {
+            Core::Dyn(children) | Core::DynUndef(children) if self.named(children, "prop") => {
+                children.get(2) == Some(&object) && children.get(3).is_some_and(|&k| matches!(self.out[k], Core::Str(s) if s == name))
+            }
+            _ => false,
+        }
+    }
+    /// The term `id` with `to` in place of the term `from`.
+    pub fn replace(&mut self, id: Id, from: Id, to: Id) -> Id {
+        let mut done = rustc_hash::FxHashMap::default();
+        self.replace_in(id, from, to, &mut done)
+    }
+    fn replace_in(&mut self, id: Id, from: Id, to: Id, done: &mut rustc_hash::FxHashMap<Id, Id>) -> Id {
+        if id == from {
+            return to;
+        }
+        if let Some(&out) = done.get(&id) {
+            return out;
+        }
+        let node = self.out[id].clone().map_children(|c| self.replace_in(c, from, to, done));
+        let out = self.add(node);
+        done.insert(id, out);
+        out
+    }
+    /// Whether a term `roots` reach holds `term` other than as the object of a field read whose
+    /// name is not among `withheld`.
+    pub fn escapes(&self, roots: &[Id], term: Id, withheld: &[Utf16]) -> bool {
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut stack = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let node = &self.out[id];
+            if node.children().contains(&term) {
+                let read = match node {
+                    Core::Dyn(children) | Core::DynUndef(children) if self.named(children, "prop") && children.get(2) == Some(&term) => {
+                        children.get(3).is_some_and(|&k| matches!(self.out[k], Core::Str(s) if !withheld.contains(&s)))
+                    }
+                    _ => false,
+                };
+                if !read {
+                    return true;
+                }
+            }
+            stack.extend(node.children().iter().copied().filter(|&c| c != term));
+        }
+        false
+    }
     /// The terms `root` reaches, in the order they were added. A node is added after its
     /// children and only once, so each kept node follows its children, `root` comes last, and
     /// nothing needs sharing again.

@@ -9,6 +9,7 @@ mod lists;
 mod mutate;
 mod ops;
 mod refs;
+mod seeded;
 mod usage;
 mod value;
 
@@ -92,12 +93,16 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
             let log = lowerer.state.log.clone();
             let effects = match &log {
                 Val::List(entries) if entries.is_empty() => None,
-                log => {
-                    let id = lowerer.emit(log);
-                    Some(lowerer.b.finish(id))
-                }
+                log => Some(lowerer.emit(log)),
             };
-            Lowered { expr: lowerer.b.finish(root), effects, opaque: lowerer.opaque }
+            // A fold whose fields keep an element is followed only where those fields are read:
+            // anywhere else its answer goes, the element or the seed goes unjudged.
+            let roots: Vec<Id> = std::iter::once(root).chain(effects).collect();
+            let escaped = lowerer.selections.iter().any(|(&fold, fields)| {
+                let withheld: Vec<Utf16> = fields.iter().map(|(name, _)| *name).collect();
+                lowerer.b.escapes(&roots, fold, &withheld)
+            });
+            Lowered { expr: lowerer.b.finish(root), effects: effects.map(|id| lowerer.b.finish(id)), opaque: lowerer.opaque || escaped }
         })
         .collect())
 }
@@ -135,6 +140,9 @@ pub struct Lowerer<'a, 'l> {
     exact: FxHashMap<Id, Val<'a>>,
     /// Each string the source spells, as text.
     texts: FxHashMap<&'a str, Utf16>,
+    /// Each fold term whose record answer has fields that keep an element, with what reading
+    /// each of those fields gives.
+    selections: FxHashMap<Id, std::rc::Rc<Vec<(Utf16, Val<'a>)>>>,
     /// Each declared return type's form, by the type's address in the program.
     forms: FxHashMap<usize, std::rc::Rc<declare::Form>>,
     /// The types the program names, through which a declared return type resolves.
@@ -195,6 +203,7 @@ impl<'a, 'l> Lowerer<'a, 'l> {
             exact: FxHashMap::default(),
             forms: FxHashMap::default(),
             texts: FxHashMap::default(),
+            selections: FxHashMap::default(),
             defined: FxHashMap::default(),
             env: Env::default(),
             narrow: FxHashMap::default(),

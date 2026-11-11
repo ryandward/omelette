@@ -1014,12 +1014,30 @@ impl<'a> Lowerer<'a, '_> {
             self.walking.pop();
             (acc, Ty::Any, self.emit(&body))
         };
+        // Without a seed, a fold keeps only elements; with one, the seed may stand for one.
+        let kept = match &init {
+            Some(seed) => self.seeded(list, super::seeded::Binders { acc, x, i }, body, seed),
+            None => super::seeded::Seeded::Plain,
+        };
+        let fields = match kept {
+            super::seeded::Seeded::Plain => None,
+            super::seeded::Seeded::Undecided => {
+                self.opaque = true;
+                None
+            }
+            super::seeded::Seeded::Whole(answer) => return answer,
+            super::seeded::Seeded::Fields(fields) => Some(fields),
+        };
         let lam = self.b.add(Core::Lam(vec![acc, x, i, body].into()));
         let init = match init {
             Some(z) => self.emit(&z),
             None => self.b.add(Core::Throw),
         };
-        Val::Term(self.b.add(Core::Fold([lam, init, list.id])), ty)
+        let fold = self.b.add(Core::Fold([lam, init, list.id]));
+        if let Some(fields) = fields {
+            self.selections.insert(fold, Rc::new(fields));
+        }
+        Val::Term(fold, ty)
     }
     /// A value's static type, reading what an array with identity holds; `None` for an
     /// integer.
