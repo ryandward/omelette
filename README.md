@@ -190,7 +190,7 @@ The verdicts concern this model, not general JavaScript safety.
 | One-time runtime initialization | 854.0 us |
 | First evaluation after initialization | 153.8 us |
 
-The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's parser and parser-plus-lowering p95 below 50 us, total p95 below 1 ms, and fewer than 150 e-nodes; the tests assert correctness and graph bounds without wall-clock thresholds.
+The worst case is `[0, ...widths.slice(i, i + 1)].filter((_, k) => k === widths.slice(i, i + 1).length)[0]`. These are measured samples on this host, not scheduling guarantees. `--check` requires every case's total p95 below 1 ms and fewer than 150 e-nodes; the parser and lowering columns are reported, not checked; the tests assert correctness and graph bounds without wall-clock thresholds.
 
 ## License
 

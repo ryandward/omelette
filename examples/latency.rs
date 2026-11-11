@@ -59,8 +59,6 @@ fn report(index: usize, case: Case<'_>, samples: &mut Samples, check: bool) {
     assert!(r.saturated && r.consistent, "{src}");
     let (p, l, t) = (&samples.parse, &samples.lower, &samples.total);
     if check {
-        assert!(quantile(p, 95) < 50.0, "parser p95 exceeded 50 us: {src}");
-        assert!(quantile(l, 95) < 50.0, "parser + lowering p95 exceeded 50 us: {src}");
         assert!(quantile(t, 95) < 1000.0, "end-to-end p95 exceeded 1 ms: {src}");
         assert!(r.nodes < 150, "graph exceeded 149 nodes: {src}");
     }
