@@ -62,6 +62,30 @@ pub fn prelude(program: &Program<'_>) -> Result<HashMap<String, Declared>, Strin
     Ok(declared)
 }
 
+/// A record type's fields: each named property with the JavaScript types its value can have.
+pub type Fields = std::rc::Rc<[(crate::core::Utf16, Shape)]>;
+
+/// The fields of each variable a program declares with a record type (a type literal, or an
+/// alias or interface naming one, with named properties only), so reading one of those
+/// fields gives a value of the field's type rather than any value.
+pub fn records(program: &Program<'_>) -> HashMap<String, Fields> {
+    let types = Types::of(program);
+    program
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            Statement::VariableDeclaration(d) if d.declare => Some(d),
+            _ => None,
+        })
+        .flat_map(|d| d.declarations.iter())
+        .filter_map(|v| {
+            let BindingPattern::BindingIdentifier(name) = &v.id else { return None };
+            let annotation = v.type_annotation.as_ref()?;
+            Some((name.name.to_string(), types.fields(&annotation.type_annotation)?))
+        })
+        .collect()
+}
+
 /// The variables a program declares with `declare const`: inputs, named in the program.
 pub fn ambient(program: &Program<'_>) -> Vec<(String, oxc_semantic::SymbolId)> {
     program
@@ -211,6 +235,45 @@ impl<'t, 'a> Types<'t, 'a> {
             fields.push((crate::core::Utf16::new(name.encode_utf16()), form));
         }
         Some(Form::Record(fields))
+    }
+    /// A record type's fields, through aliases, interfaces, `readonly`, and parentheses:
+    /// `None` for any other type, or one with a call, construct, index, or method signature.
+    fn fields(&self, t: &TSType<'_>) -> Option<Fields> {
+        match t {
+            TSType::TSTypeLiteral(l) => self.signature_fields(&l.members),
+            TSType::TSParenthesizedType(p) => self.fields(&p.type_annotation),
+            TSType::TSTypeOperatorType(o) if o.operator == TSTypeOperatorOperator::Readonly => self.fields(&o.type_annotation),
+            TSType::TSTypeReference(r) if r.type_arguments.is_none() => {
+                let (&key, named) = name(&r.type_name).and_then(|n| self.named.get_key_value(n))?;
+                if self.open.borrow().contains(&key) {
+                    return None;
+                }
+                self.open.borrow_mut().push(key);
+                let fields = match *named {
+                    Named::Alias(t) => self.fields(t),
+                    Named::Interface(signatures) => self.signature_fields(signatures),
+                };
+                self.open.borrow_mut().pop();
+                fields
+            }
+            _ => None,
+        }
+    }
+    /// The named properties of an object type, an optional one possibly undefined.
+    fn signature_fields(&self, signatures: &[TSSignature<'_>]) -> Option<Fields> {
+        let mut fields = Vec::with_capacity(signatures.len());
+        for signature in signatures {
+            let TSSignature::TSPropertySignature(p) = signature else { return None };
+            if p.computed {
+                return None;
+            }
+            let name = p.key.static_name();
+            let name = name.as_ref().and_then(|n| n.as_str())?;
+            let shape = p.type_annotation.as_ref().map_or(Ok(Shape::ALL), |a| self.shape(&a.type_annotation)).ok()?;
+            let shape = if p.optional { shape.or(Shape::UNDEF) } else { shape };
+            fields.push((crate::core::Utf16::new(name.encode_utf16()), shape));
+        }
+        Some(fields.into())
     }
     fn declaration(&self, t: &TSType<'_>) -> Result<Declared, String> {
         Ok(match self.elements(t)? {

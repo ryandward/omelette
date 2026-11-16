@@ -73,6 +73,10 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .collect();
     let ambient: Vec<_> = programs.iter().map(|p| declare::ambient(p)).collect();
     let types: Vec<_> = programs.iter().map(declare::Types::of).collect();
+    let mut records: HashMap<String, declare::Fields> = HashMap::new();
+    for program in &programs {
+        records.extend(declare::records(program));
+    }
     let mut kinds = HashMap::new();
     for (semantic, ambient) in semantics.iter().zip(&ambient) {
         usage::classify(semantic, ambient, &mut kinds);
@@ -86,7 +90,7 @@ pub fn lower_all(sources: &[&str]) -> Result<Vec<Lowered>, String> {
         .zip(&ambient)
         .zip(&types)
         .map(|(((program, semantic), ambient), types)| {
-            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, &declared, types);
+            let mut lowerer = Lowerer::new(semantic.scoping(), &kinds, (&declared, &records), types);
             lowerer.ambient = ambient.iter().map(|(_, symbol)| *symbol).collect();
             let value = lowerer.module(&program.body);
             let root = lowerer.emit(&value);
@@ -133,6 +137,10 @@ pub struct Lowerer<'a, 'l> {
     kinds: &'l HashMap<String, Kind>,
     /// What declarations say the free variables hold.
     declared: &'l HashMap<String, Declared>,
+    /// The fields of each variable declared with a record type.
+    records: &'l HashMap<String, declare::Fields>,
+    /// Each free variable of a declared record type, by its term, with its fields.
+    typed: FxHashMap<Id, declare::Fields>,
     /// The variables `declare const` names: inputs, though the program binds them.
     ambient: FxHashSet<oxc_semantic::SymbolId>,
     /// Each stand-in for a declared or widened answer, with the exact answer, which control
@@ -192,12 +200,19 @@ pub struct Lowerer<'a, 'l> {
 }
 
 impl<'a, 'l> Lowerer<'a, 'l> {
-    fn new(scoping: &'l Scoping, kinds: &'l HashMap<String, Kind>, declared: &'l HashMap<String, Declared>, types: &'l declare::Types<'l, 'a>) -> Self {
+    fn new(
+        scoping: &'l Scoping,
+        kinds: &'l HashMap<String, Kind>,
+        (declared, records): (&'l HashMap<String, Declared>, &'l HashMap<String, declare::Fields>),
+        types: &'l declare::Types<'l, 'a>,
+    ) -> Self {
         Self {
             b: Builder::default(),
             scoping,
             kinds,
             declared,
+            records,
+            typed: FxHashMap::default(),
             ambient: FxHashSet::default(),
             types,
             exact: FxHashMap::default(),

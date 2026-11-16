@@ -125,6 +125,9 @@ impl<'a> Lowerer<'a, '_> {
             _ => kind.shape(),
         };
         let var = self.b.shaped_var(kind, name, shape);
+        if let Some(fields) = self.records.get(name) {
+            self.typed.insert(var, fields.clone());
+        }
         match kind {
             Kind::Int => Val::Num(Form::atom(var)),
             Kind::Fun => Val::Term(var, Ty::Defined),
@@ -181,13 +184,23 @@ impl<'a> Lowerer<'a, '_> {
         }
         out
     }
-    /// An object literal with named fields, evaluated in order: a record. Computed names,
-    /// spreads, methods, and accessors are not modeled.
+    /// An object literal with named fields, evaluated in order: a record. A spread copies a
+    /// record's fields, or the fields a declared record type names (each read as that field
+    /// is); computed names, spreads of anything else, methods, and accessors are not modeled.
     fn record(&mut self, o: &'a oxc_ast::ast::ObjectExpression<'a>) -> Val<'a> {
         use oxc_ast::ast::{ObjectPropertyKind, PropertyKind};
         let mut names = Vec::with_capacity(o.properties.len());
         let mut values = Vec::with_capacity(o.properties.len());
         for property in &o.properties {
+            if let ObjectPropertyKind::SpreadProperty(spread) = property {
+                let source = self.expr(&spread.argument);
+                let Some(fields) = self.spread_fields(&source) else { return self.unsupported() };
+                for (name, value) in fields {
+                    names.push(name);
+                    values.push(value);
+                }
+                continue;
+            }
             let ObjectPropertyKind::ObjectProperty(p) = property else { return self.unsupported() };
             let name = p.key.static_name();
             let name = name.as_ref().and_then(|n| n.as_str());
@@ -211,6 +224,18 @@ impl<'a> Lowerer<'a, '_> {
             }
             Val::Record(Rc::new(fields))
         })
+    }
+    /// The fields a spread of `source` copies, in order: a record's, or those its declared
+    /// record type names. `None` for any other value.
+    fn spread_fields(&mut self, source: &Val<'a>) -> Option<Vec<(Utf16, Val<'a>)>> {
+        match source {
+            Val::Record(fields) => Some(fields.iter().cloned().collect()),
+            Val::Term(id, _) => {
+                let declared = self.record_fields(*id)?;
+                Some(declared.iter().map(|&(name, _)| (name, self.field_of(source, *id, name))).collect())
+            }
+            _ => None,
+        }
     }
     /// An array literal: every element is evaluated, so one that throws makes it throw.
     fn array(&mut self, a: &'a ArrayExpression<'a>) -> Val<'a> {

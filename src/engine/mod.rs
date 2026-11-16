@@ -198,6 +198,9 @@ fn trace(run: &Runner<Core, Facts, ()>) {
 /// Several roots saturated in one graph, for proving equalities between spellings.
 pub struct JointEvaluation {
     pub roots: Vec<Id>,
+    /// Whether lowering each expression evaluated something it does not model: its root is
+    /// then its value under the model's assumptions, so a shared class proves nothing about it.
+    pub opaque: Vec<bool>,
     pub canonical: Vec<RecExpr<Core>>,
     pub saturated: bool,
     /// An inconsistent graph proves any two roots equal, so its classes prove nothing.
@@ -213,7 +216,9 @@ pub struct JointEvaluation {
 /// A syntax error, or a source that is not a single expression.
 pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
     let mut runner = runner(Limits::default());
+    let mut opaque = Vec::with_capacity(sources.len());
     for lowered in crate::lower::lower_all(sources)? {
+        opaque.push(lowered.opaque);
         runner = runner.with_expr(&lowered.expr);
     }
     let run = runner.run(rules::rules());
@@ -222,6 +227,7 @@ pub fn evaluate_joint(sources: &[&str]) -> Result<JointEvaluation, String> {
     Ok(JointEvaluation {
         canonical: roots.iter().map(|&id| exact(&extractor.find_best(id).1)).collect(),
         roots,
+        opaque,
         saturated: matches!(run.stop_reason, Some(StopReason::Saturated)),
         consistent: run.egraph.classes().all(|c| !c.data.clash),
         nodes: run.egraph.total_size(),

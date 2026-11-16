@@ -1,17 +1,19 @@
-//! Command-line probe: `omelette '<expr>' [--all]` or `omelette --joint '<a>' '<b>' ...`.
+//! Command-line probe: `omelette '<expr>' [--all]` or `omelette --joint [--json] '<a>' '<b>' ...`.
 use egg::{Language, RecExpr};
 use omelette::core::Core;
-use omelette::engine::{Evaluation, Mutation, evaluate, evaluate_joint, initialize};
+use omelette::engine::{Evaluation, JointEvaluation, Mutation, evaluate, evaluate_joint, initialize};
+use std::fmt::Write as _;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let all = args.iter().any(|s| s == "--all");
     let joint = args.iter().any(|s| s == "--joint");
+    let json = args.iter().any(|s| s == "--json");
     let exprs: Vec<&str> = args.iter().filter(|s| !s.starts_with("--")).map(String::as_str).collect();
     initialize();
     if joint {
-        return print_joint(&exprs);
+        return print_joint(&exprs, json);
     }
     let mut status = ExitCode::SUCCESS;
     for src in exprs {
@@ -67,13 +69,18 @@ fn print(r: &Evaluation, all: bool) {
     }
 }
 
-fn print_joint(exprs: &[&str]) -> ExitCode {
+fn print_joint(exprs: &[&str], json: bool) -> ExitCode {
     match evaluate_joint(exprs) {
+        Ok(r) if json => {
+            println!("{}", joint_json(&r));
+            ExitCode::SUCCESS
+        }
         Ok(r) => {
             println!("joint: {} iterations, {} e-nodes, saturated: {}", r.iterations, r.nodes, r.saturated);
             println!("consistency: {}", consistency(r.consistent));
-            for ((src, id), term) in exprs.iter().zip(&r.roots).zip(&r.canonical) {
-                println!("c{id}: {src}\n  {term}");
+            for (((src, id), term), opaque) in exprs.iter().zip(&r.roots).zip(&r.canonical).zip(&r.opaque) {
+                let note = if *opaque { " (opaque: the root assumes what lowering does not model)" } else { "" };
+                println!("c{id}: {src}{note}\n  {term}");
             }
             ExitCode::SUCCESS
         }
@@ -82,6 +89,51 @@ fn print_joint(exprs: &[&str]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The joint run as JSON: its soundness, each root's class, and each root's term as a list
+/// of nodes, each its operator (or datum) and its children's positions in that list.
+fn joint_json(r: &JointEvaluation) -> String {
+    let roots: Vec<String> = r.roots.iter().map(ToString::to_string).collect();
+    let opaque: Vec<String> = r.opaque.iter().map(ToString::to_string).collect();
+    let terms: Vec<String> = r.canonical.iter().map(term_json).collect();
+    format!(
+        "{{\"saturated\":{},\"consistent\":{},\"roots\":[{}],\"opaque\":[{}],\"terms\":[{}]}}",
+        r.saturated,
+        r.consistent,
+        roots.join(","),
+        opaque.join(","),
+        terms.join(",")
+    )
+}
+
+fn term_json(term: &RecExpr<Core>) -> String {
+    let nodes: Vec<String> = term
+        .as_ref()
+        .iter()
+        .map(|node| {
+            let children: Vec<String> = node.children().iter().map(|&c| usize::from(c).to_string()).collect();
+            format!("[{},[{}]]", json_string(&node.to_string()), children.join(","))
+        })
+        .collect();
+    format!("[{}]", nodes.join(","))
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn consistency(consistent: bool) -> &'static str {

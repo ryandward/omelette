@@ -120,6 +120,9 @@ pub enum Builtin {
     ParseInt,
     ParseFloat,
     Stringify,
+    /// `Math.max` and `Math.min`.
+    Max,
+    Min,
 }
 
 /// The identity of an array a mutation can reach.

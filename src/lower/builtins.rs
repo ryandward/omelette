@@ -1,5 +1,5 @@
 //! The global conversion functions: `Number`, `String`, `Boolean`, `parseInt`, `parseFloat`,
-//! and `JSON.stringify`, as values and as calls. Known arguments fold exactly as JavaScript
+//! and `JSON.stringify`, and `Math.max` and `Math.min`, as values and as calls. Known arguments fold exactly as JavaScript
 //! computes them; others become `dyn` terms of the shape the function returns.
 use super::Lowerer;
 use super::expr::integer;
@@ -24,11 +24,16 @@ impl Builtin {
     }
     /// The function `object.property` names, for a free `object`.
     pub fn member(object: &str, property: &str) -> Option<Self> {
-        (object == "JSON" && property == "stringify").then_some(Self::Stringify)
+        match (object, property) {
+            ("JSON", "stringify") => Some(Self::Stringify),
+            ("Math", "max") => Some(Self::Max),
+            ("Math", "min") => Some(Self::Min),
+            _ => None,
+        }
     }
     /// Whether a free name is a global lowering models rather than an input.
     pub fn is_global(name: &str) -> bool {
-        Self::global(name).is_some() || name == "JSON"
+        Self::global(name).is_some() || name == "JSON" || name == "Math"
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -38,6 +43,8 @@ impl Builtin {
             Self::ParseInt => "parseInt",
             Self::ParseFloat => "parseFloat",
             Self::Stringify => "JSON.stringify",
+            Self::Max => "Math.max",
+            Self::Min => "Math.min",
         }
     }
 }
@@ -73,7 +80,24 @@ impl<'a> Lowerer<'a, '_> {
                 }
                 self.lift(v.unwrap_or(Val::Undef), Family::Sink, &mut |l, v| l.json(v, &[], false))
             }
+            (Builtin::Max | Builtin::Min, _) => self.extremum(b == Builtin::Max, args),
         }
+    }
+
+    /// `Math.max(a, b)` and `Math.min(a, b)` of two integers: the larger or the smaller, as a
+    /// choice on their order; `NaN` where either is `undefined` or `NaN`. Any other arity, or
+    /// an operand that is not an integer, is a number lowering does not know.
+    fn extremum(&mut self, max: bool, args: &[Val<'a>]) -> Val<'a> {
+        let [a, b] = args else { return self.unsupported() };
+        let name = if max { "Math.max" } else { "Math.min" };
+        self.lift2(a.clone(), b.clone(), Family::Sink, &mut |l, a, b| match (&a, &b) {
+            (Val::Undef | Val::NaN, _) | (_, Val::Undef | Val::NaN) => Val::NaN,
+            (Val::Num(_), Val::Num(_)) => {
+                let less = l.binary(Bin::Lt, a.clone(), b.clone());
+                if max { l.select(&less, b, a) } else { l.select(&less, a, b) }
+            }
+            _ => l.shaped(name, &[&a, &b], Ty::Defined, Shape::NUM),
+        })
     }
 
     /// `ToNumber`: what `Number(v)`, unary `+`, and arithmetic make of a value. Only integers

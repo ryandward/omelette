@@ -197,16 +197,57 @@ impl<'a> Lowerer<'a, '_> {
                         let name = l.spelled(name);
                         l.field(&fields, name)
                     }
-                    // A value of unknown type may hold any value there, or none.
-                    Val::Term(_, Ty::Defined | Ty::Any) if name != "length" => {
-                        let key = Val::Str(l.spelled(name));
-                        l.dynamic("prop", &[&v, &key], Ty::Any)
-                    }
+                    // A field a declared record type names holds a value of the field's type; a
+                    // value of unknown type may hold any value there, or none.
+                    Val::Term(id, Ty::Defined | Ty::Any) if name != "length" => l.field_of_name(&v, id, name),
                     v if name == "length" => l.length(v),
                     _ => l.unsupported(),
                 }
             }
         })
+    }
+    /// `v.name` for a symbolic `v`: of the field's type where `v`'s declared record type names
+    /// the field (a number is an integer atom), and otherwise any value, or none.
+    fn field_of_name(&mut self, v: &Val<'a>, id: Id, name: &'a str) -> Val<'a> {
+        let spelled = self.spelled(name);
+        self.field_of(v, id, spelled)
+    }
+    /// [`Self::field_of_name`] for a name already spelled as text.
+    pub fn field_of(&mut self, v: &Val<'a>, id: Id, spelled: Utf16) -> Val<'a> {
+        let key = Val::Str(spelled);
+        let shape = self.record_fields(id).and_then(|fields| fields.iter().find(|(n, _)| *n == spelled).map(|&(_, s)| s));
+        match shape {
+            Some(s) if s == Shape::NUM => match self.shaped("prop", &[v, &key], Ty::Defined, Shape::NUM) {
+                Val::Term(t, _) => Val::Num(Form::atom(t)),
+                other => other,
+            },
+            Some(s) => self.shaped("prop", &[v, &key], Ty::of(s), s),
+            None => self.dynamic("prop", &[v, &key], Ty::Any),
+        }
+    }
+    /// The fields of a term of a declared record type: a variable declared with one, or a
+    /// conditional whose branches both have the same fields.
+    pub fn record_fields(&self, id: Id) -> Option<super::declare::Fields> {
+        if let Some(fields) = self.typed.get(&id) {
+            return Some(fields.clone());
+        }
+        match self.b.node(id) {
+            &Core::If([_, then, otherwise]) => {
+                let (a, b) = (self.record_fields(then)?, self.record_fields(otherwise)?);
+                (a == b).then_some(a)
+            }
+            // A record the expression built, which a choice made a term.
+            Core::Obj(children) => {
+                let mut fields = Vec::with_capacity(children.len() / 2);
+                for pair in children.chunks(2) {
+                    let &[name, value] = pair else { return None };
+                    let &Core::Str(name) = self.b.node(name) else { return None };
+                    fields.push((name, self.shape(&Val::Term(value, Ty::Any))));
+                }
+                Some(fields.into())
+            }
+            _ => None,
+        }
     }
     /// A record's field: its value, or undefined where it has none. A name every object
     /// inherits, such as `toString`, is not modeled.
