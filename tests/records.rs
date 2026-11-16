@@ -26,6 +26,18 @@ fn a_declared_field_reads_as_its_type() {
 }
 
 #[test]
+fn a_union_of_records_has_every_member_field() {
+    initialize();
+    let decls = "type Hist = { readonly kind: 'start' } | { readonly kind: 'edit'; readonly at: number; readonly prev: Hist }; declare const h: Hist;";
+    // Every member names `kind`, so it is a string; only one names `at`, which may be missing.
+    let r = checked(&format!("{decls} h.kind"), Verdict::NoCheat);
+    let root = r.canonical.to_string();
+    assert!(root.starts_with("(dyn ") && root.contains("shape:s"), "{root}");
+    let r = evaluate(&format!("{decls} h.at")).unwrap();
+    assert!(r.canonical.to_string().contains("dyn?"), "{}", r.canonical);
+}
+
+#[test]
 fn a_spread_copies_the_declared_fields() {
     initialize();
     let r = checked(&with("declare const x: Item;", "({ ...x, k: x.k + 1 }).k - x.k"), Verdict::NoCheat);

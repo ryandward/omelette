@@ -241,6 +241,10 @@ impl<'t, 'a> Types<'t, 'a> {
     fn fields(&self, t: &TSType<'_>) -> Option<Fields> {
         match t {
             TSType::TSTypeLiteral(l) => self.signature_fields(&l.members),
+            TSType::TSUnionType(u) => {
+                let members: Option<Vec<Fields>> = u.types.iter().map(|t| self.fields(t)).collect();
+                members.map(|m| union_fields(&m))
+            }
             TSType::TSParenthesizedType(p) => self.fields(&p.type_annotation),
             TSType::TSTypeOperatorType(o) if o.operator == TSTypeOperatorOperator::Readonly => self.fields(&o.type_annotation),
             TSType::TSTypeReference(r) if r.type_arguments.is_none() => {
@@ -391,6 +395,26 @@ impl<'t, 'a> Types<'t, 'a> {
             _ => Shape::ALL,
         })
     }
+}
+
+/// The fields of a union of record types: every field a member names, holding what any
+/// member holds there, or nothing where some member does not name it.
+fn union_fields(members: &[Fields]) -> Fields {
+    let mut fields: Vec<(crate::core::Utf16, Shape)> = Vec::new();
+    for member in members {
+        for &(name, shape) in member.iter() {
+            match fields.iter_mut().find(|(n, _)| *n == name) {
+                Some(field) => field.1 = field.1.or(shape),
+                None => fields.push((name, shape)),
+            }
+        }
+    }
+    for field in &mut fields {
+        if members.iter().any(|m| m.iter().all(|(n, _)| *n != field.0)) {
+            field.1 = field.1.or(Shape::UNDEF);
+        }
+    }
+    fields.into()
 }
 
 fn name<'a>(n: &'a TSTypeName<'_>) -> Option<&'a str> {
